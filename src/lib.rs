@@ -3,7 +3,7 @@ use unix::{memory_lock, memory_resize_and_lock};
 #[cfg(windows)]
 use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
-    memtest::{MemtestError, MemtestKind, MemtestOutcome},
+    memtest::{MemtestError, MemtestOutcome},
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
     serde::{Deserialize, Serialize},
@@ -14,8 +14,10 @@ use {
     },
 };
 
-mod memtest;
+pub mod memtest;
 mod prelude;
+
+pub use memtest::MemtestKind;
 
 #[derive(Debug)]
 pub struct MemtestRunner {
@@ -104,21 +106,7 @@ struct TimeoutCheckerState {
 impl MemtestRunner {
     /// Create a MemtestRunner containing all test kinds in random order
     pub fn all_tests_random_order(args: &MemtestRunnerArgs) -> MemtestRunner {
-        let mut test_kinds = vec![
-            MemtestKind::OwnAddressBasic,
-            MemtestKind::OwnAddressRepeat,
-            MemtestKind::RandomVal,
-            MemtestKind::Xor,
-            MemtestKind::Sub,
-            MemtestKind::Mul,
-            MemtestKind::Div,
-            MemtestKind::Or,
-            MemtestKind::And,
-            MemtestKind::SeqInc,
-            MemtestKind::SolidBits,
-            MemtestKind::Checkerboard,
-            MemtestKind::BlockSeq,
-        ];
+        let mut test_kinds = MemtestKind::all_test_kinds();
         test_kinds.shuffle(&mut thread_rng());
 
         Self::from_test_kinds(args, test_kinds)
