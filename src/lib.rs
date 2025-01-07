@@ -172,6 +172,8 @@ impl MemtestRunner {
     /// Run tests
     fn run_tests(&self, memory: &mut [usize], deadline: Instant) -> Vec<MemtestReport> {
         let mut reports = Vec::new();
+        let mut timed_out = false;
+
         for test_kind in &self.test_kinds {
             let test = match test_kind {
                 MemtestKind::OwnAddressBasic => memtest::test_own_address_basic,
@@ -189,7 +191,9 @@ impl MemtestRunner {
                 MemtestKind::BlockSeq => memtest::test_block_seq,
             };
 
-            let test_result = if self.allow_multithread {
+            let test_result = if timed_out {
+                Err(MemtestError::Timeout)
+            } else if self.allow_multithread {
                 std::thread::scope(|scope| {
                     let num_threads = num_cpus::get();
                     let chunk_size = memory.len() / num_threads;
@@ -221,6 +225,7 @@ impl MemtestRunner {
             } else {
                 test(memory, TimeoutChecker::new(deadline))
             };
+            timed_out = matches!(test_result, Err(MemtestError::Timeout));
 
             if matches!(test_result, Ok(MemtestOutcome::Fail(_))) && self.allow_early_termination {
                 reports.push(MemtestReport::new(*test_kind, test_result));
