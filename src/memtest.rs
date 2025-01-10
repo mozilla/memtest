@@ -1,20 +1,21 @@
 use {
     crate::{prelude::*, TimeoutChecker},
     rand::random,
+    serde::{Deserialize, Deserializer, Serialize, Serializer},
     std::{error::Error, fmt},
 };
 
 // TODO: Intend to convert this module to a standalone `no_std` crate
 // TODO: TimeoutChecker will be a trait instead
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[must_use]
 pub enum MemtestOutcome {
     Pass,
     Fail(MemtestFailure),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum MemtestFailure {
     /// Failure due to the actual value read being different from the expected value
     UnexpectedValue {
@@ -32,13 +33,17 @@ pub enum MemtestFailure {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum MemtestError {
     Timeout,
+    #[serde(
+        serialize_with = "serialize_memtest_error_other",
+        deserialize_with = "deserialize_memtest_error_other"
+    )]
     Other(anyhow::Error),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemtestKind {
     OwnAddressBasic,
     OwnAddressRepeat,
@@ -53,6 +58,29 @@ pub enum MemtestKind {
     SolidBits,
     Checkerboard,
     BlockSeq,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParseMemtestKindError;
+
+impl MemtestKind {
+    pub fn all_test_kinds() -> Vec<Self> {
+        vec![
+            Self::OwnAddressBasic,
+            Self::OwnAddressRepeat,
+            Self::RandomVal,
+            Self::Xor,
+            Self::Sub,
+            Self::Mul,
+            Self::Div,
+            Self::Or,
+            Self::And,
+            Self::SeqInc,
+            Self::SolidBits,
+            Self::Checkerboard,
+            Self::BlockSeq,
+        ]
+    }
 }
 
 /// Write the address of each memory location to itself, then read back the value and check that it
@@ -462,6 +490,29 @@ fn compare_regions(
     Ok(MemtestOutcome::Pass)
 }
 
+impl std::str::FromStr for MemtestKind {
+    type Err = ParseMemtestKindError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "OwnAddressBasic" => Ok(Self::OwnAddressBasic),
+            "OwnAddressRepeat" => Ok(Self::OwnAddressRepeat),
+            "RandomVal" => Ok(Self::RandomVal),
+            "Xor" => Ok(Self::Xor),
+            "Sub" => Ok(Self::Sub),
+            "Mul" => Ok(Self::Mul),
+            "Div" => Ok(Self::Div),
+            "Or" => Ok(Self::Or),
+            "And" => Ok(Self::And),
+            "SeqInc" => Ok(Self::SeqInc),
+            "SolidBits" => Ok(Self::SolidBits),
+            "Checkerboard" => Ok(Self::Checkerboard),
+            "BlockSeq" => Ok(Self::BlockSeq),
+            _ => Err(ParseMemtestKindError),
+        }
+    }
+}
+
 impl fmt::Display for MemtestOutcome {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Outcome: {:?}", self)
@@ -487,4 +538,19 @@ impl From<anyhow::Error> for MemtestError {
     fn from(err: anyhow::Error) -> MemtestError {
         MemtestError::Other(err)
     }
+}
+
+fn serialize_memtest_error_other<S>(error: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("{:?}", error))
+}
+
+fn deserialize_memtest_error_other<'de, D>(deserializer: D) -> Result<anyhow::Error, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let str = String::deserialize(deserializer)?;
+    Ok(anyhow!(str))
 }

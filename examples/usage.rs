@@ -1,6 +1,7 @@
 use {
     anyhow::Context,
-    memtest::{MemtestRunner, MemtestRunnerArgs},
+    memtest::{MemtestKind, MemtestRunner, MemtestRunnerArgs},
+    rand::{seq::SliceRandom, thread_rng},
     std::{
         mem::size_of,
         time::{Duration, Instant},
@@ -10,7 +11,6 @@ use {
 };
 
 // TODO: Command line option for json output
-// TODO: Command line option for specifying tests?
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .init();
     let start_time = Instant::now();
-    let (mem_usize_count, memtest_runner_args) = match parse_args() {
+    let (mem_usize_count, memtest_runner_args, memtest_kinds) = match parse_args() {
         Ok(parsed_args) => parsed_args,
         Err(s) => {
             eprintln!(concat!(
@@ -29,7 +29,8 @@ fn main() -> anyhow::Result<()> {
                 "<mem_lock_mode> ",
                 "<allow_working_set_resize as bool> ",
                 "<allow_multithread as bool> ",
-                "<allow_early_temrmination as bool> "
+                "<allow_early_temrmination as bool> ",
+                "<memtest_kinds as space separated string>"
             ));
             anyhow::bail!("Invalid/missing argument '{s}'");
         }
@@ -37,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     info!("Running memtest-runner with: {memtest_runner_args:#?}");
     let mut memory = vec![0; mem_usize_count];
-    let report_list = MemtestRunner::all_tests_random_order(&memtest_runner_args)
+    let report_list = MemtestRunner::from_test_kinds(&memtest_runner_args, memtest_kinds)
         .run(&mut memory)
         .context("Failed to run memtest-runner")?;
     println!("Tester ran for {:?}", start_time.elapsed());
@@ -52,7 +53,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Parse command line arguments to return a usize for the requested memory vector length and
 /// other MemtestRunner arguments
-fn parse_args() -> Result<(usize, MemtestRunnerArgs), &'static str> {
+fn parse_args() -> Result<(usize, MemtestRunnerArgs, Vec<MemtestKind>), &'static str> {
     const KB: usize = 1024;
     const MB: usize = 1024 * KB;
 
@@ -64,16 +65,33 @@ fn parse_args() -> Result<(usize, MemtestRunnerArgs), &'static str> {
 
     let memsize: usize = parse_next!("memsize");
     let mem_usize_count = memsize * MB / size_of::<usize>();
-    let timeout = Duration::from_millis(parse_next!("timeout_ms"));
 
-    Ok((
-        mem_usize_count,
-        MemtestRunnerArgs {
-            timeout,
-            mem_lock_mode: parse_next!("mem_lock_mode"),
-            allow_working_set_resize: parse_next!("allow_working_set_resize"),
-            allow_multithread: parse_next!("allow_multithread"),
-            allow_early_termination: parse_next!("allow_early_termination"),
-        },
-    ))
+    let memtest_runner_args = MemtestRunnerArgs {
+        timeout: Duration::from_millis(parse_next!("timeout_ms")),
+        mem_lock_mode: parse_next!("mem_lock_mode"),
+        allow_working_set_resize: parse_next!("allow_working_set_resize"),
+        allow_multithread: parse_next!("allow_multithread"),
+        allow_early_termination: parse_next!("allow_early_termination"),
+    };
+
+    let memtest_kinds = memtest_kinds_from_string(parse_next!("memtest_kinds"))?;
+
+    Ok((mem_usize_count, memtest_runner_args, memtest_kinds))
+}
+
+/// Returns a vector of MemtestKind that contains all kinds, but prioritizes the given memtests.
+fn memtest_kinds_from_string(string: String) -> Result<Vec<MemtestKind>, &'static str> {
+    let specified = string
+        .split_whitespace()
+        .map(|s| s.parse().map_err(|_| "memtest_kinds"))
+        .collect::<Result<Vec<MemtestKind>, &'static str>>()?;
+
+    let mut remaining: Vec<_> = MemtestKind::all_test_kinds()
+        .iter()
+        .filter(|k| !specified.contains(k))
+        .cloned()
+        .collect();
+    remaining.shuffle(&mut thread_rng());
+
+    Ok([specified, remaining].concat())
 }
