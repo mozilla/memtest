@@ -274,6 +274,14 @@ impl std::str::FromStr for MemLockMode {
     }
 }
 
+impl fmt::Display for ParseMemLockModeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ParseMemLockModeError {}
+
 impl fmt::Display for MemtestReportList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "tested_mem_len = {}", self.tested_mem_length)?;

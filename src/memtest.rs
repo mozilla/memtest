@@ -513,6 +513,14 @@ impl std::str::FromStr for MemtestKind {
     }
 }
 
+impl fmt::Display for ParseMemtestKindError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ParseMemtestKindError {}
+
 impl fmt::Display for MemtestOutcome {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Outcome: {:?}", self)
