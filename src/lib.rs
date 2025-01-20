@@ -3,7 +3,6 @@ use unix::{memory_lock, memory_resize_and_lock};
 #[cfg(windows)]
 use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
-    memtest::{MemtestError, MemtestOutcome},
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
     serde::{Deserialize, Serialize},
@@ -14,10 +13,12 @@ use {
     },
 };
 
-pub mod memtest;
+mod memtest;
 mod prelude;
 
-pub use memtest::MemtestKind;
+pub use memtest::{
+    MemtestError, MemtestFailure, MemtestKind, MemtestOutcome, ParseMemtestKindError,
+};
 
 #[derive(Debug)]
 pub struct MemtestRunner {
