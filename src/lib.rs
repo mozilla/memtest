@@ -107,7 +107,7 @@ struct TimeoutCheckerState {
 impl MemtestRunner {
     /// Create a MemtestRunner containing all test kinds in random order
     pub fn all_tests_random_order(args: &MemtestRunnerArgs) -> MemtestRunner {
-        let mut test_kinds = MemtestKind::all_test_kinds();
+        let mut test_kinds = MemtestKind::ALL.to_vec();
         test_kinds.shuffle(&mut thread_rng());
 
         Self::from_test_kinds(args, test_kinds)

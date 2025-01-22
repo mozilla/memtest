@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
         Err(s) => {
             eprintln!(concat!(
                 "Usage: memtest-runner ",
-                "<memsize in MB> ",
+                "<memsize in MiB> ",
                 "<timeout in ms> ",
                 "<mem_lock_mode> ",
                 "<allow_working_set_resize as bool> ",
@@ -54,8 +54,8 @@ fn main() -> anyhow::Result<()> {
 /// Parse command line arguments to return a usize for the requested memory vector length and
 /// other MemtestRunner arguments
 fn parse_args() -> Result<(usize, MemtestRunnerArgs, Vec<MemtestKind>), &'static str> {
-    const KB: usize = 1024;
-    const MB: usize = 1024 * KB;
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
 
     let mut iter = std::env::args().skip(1);
 
@@ -64,7 +64,7 @@ fn parse_args() -> Result<(usize, MemtestRunnerArgs, Vec<MemtestKind>), &'static
     });
 
     let memsize: usize = parse_next!("memsize");
-    let mem_usize_count = memsize * MB / size_of::<usize>();
+    let mem_usize_count = memsize * MIB / size_of::<usize>();
 
     let memtest_runner_args = MemtestRunnerArgs {
         timeout: Duration::from_millis(parse_next!("timeout_ms")),
@@ -74,19 +74,20 @@ fn parse_args() -> Result<(usize, MemtestRunnerArgs, Vec<MemtestKind>), &'static
         allow_early_termination: parse_next!("allow_early_termination"),
     };
 
-    let memtest_kinds = memtest_kinds_from_string(parse_next!("memtest_kinds"))?;
+    let memtest_kinds_string: String = parse_next!("memtest_kinds");
+    let memtest_kinds = memtest_kinds_from_str(&memtest_kinds_string)?;
 
     Ok((mem_usize_count, memtest_runner_args, memtest_kinds))
 }
 
 /// Returns a vector of MemtestKind that contains all kinds, but prioritizes the given memtests.
-fn memtest_kinds_from_string(string: String) -> Result<Vec<MemtestKind>, &'static str> {
-    let specified = string
+fn memtest_kinds_from_str(str: &str) -> Result<Vec<MemtestKind>, &'static str> {
+    let specified = str
         .split_whitespace()
         .map(|s| s.parse().map_err(|_| "memtest_kinds"))
         .collect::<Result<Vec<MemtestKind>, &'static str>>()?;
 
-    let mut remaining: Vec<_> = MemtestKind::all_test_kinds()
+    let mut remaining: Vec<_> = MemtestKind::ALL
         .iter()
         .filter(|k| !specified.contains(k))
         .cloned()

@@ -43,8 +43,34 @@ pub enum MemtestError {
     Other(anyhow::Error),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MemtestKind {
+macro_rules! memtest_kinds {{
+    $($variant: ident),* $(,)?
+} => {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum MemtestKind {
+        $($variant,)*
+    }
+
+    impl MemtestKind {
+        pub const ALL: &[Self] = &[
+            $(Self::$variant),*
+        ];
+    }
+
+    impl std::str::FromStr for MemtestKind {
+        type Err = ParseMemtestKindError;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            match s {
+            $(
+                stringify!($variant) => Ok(Self::$variant),
+            )*
+                _ => Err(ParseMemtestKindError),
+            }
+        }
+    }
+}}
+
+memtest_kinds! {
     OwnAddressBasic,
     OwnAddressRepeat,
     RandomVal,
@@ -62,26 +88,6 @@ pub enum MemtestKind {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParseMemtestKindError;
-
-impl MemtestKind {
-    pub fn all_test_kinds() -> Vec<Self> {
-        vec![
-            Self::OwnAddressBasic,
-            Self::OwnAddressRepeat,
-            Self::RandomVal,
-            Self::Xor,
-            Self::Sub,
-            Self::Mul,
-            Self::Div,
-            Self::Or,
-            Self::And,
-            Self::SeqInc,
-            Self::SolidBits,
-            Self::Checkerboard,
-            Self::BlockSeq,
-        ]
-    }
-}
 
 /// Write the address of each memory location to itself, then read back the value and check that it
 /// matches the expected address.
@@ -488,29 +494,6 @@ fn compare_regions(
         }
     }
     Ok(MemtestOutcome::Pass)
-}
-
-impl std::str::FromStr for MemtestKind {
-    type Err = ParseMemtestKindError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "OwnAddressBasic" => Ok(Self::OwnAddressBasic),
-            "OwnAddressRepeat" => Ok(Self::OwnAddressRepeat),
-            "RandomVal" => Ok(Self::RandomVal),
-            "Xor" => Ok(Self::Xor),
-            "Sub" => Ok(Self::Sub),
-            "Mul" => Ok(Self::Mul),
-            "Div" => Ok(Self::Div),
-            "Or" => Ok(Self::Or),
-            "And" => Ok(Self::And),
-            "SeqInc" => Ok(Self::SeqInc),
-            "SolidBits" => Ok(Self::SolidBits),
-            "Checkerboard" => Ok(Self::Checkerboard),
-            "BlockSeq" => Ok(Self::BlockSeq),
-            _ => Err(ParseMemtestKindError),
-        }
-    }
 }
 
 impl fmt::Display for ParseMemtestKindError {
