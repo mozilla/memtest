@@ -5,8 +5,8 @@ version = "0.1.0"
 authors = ["Brian Tsoi <brian.s.tsoi@gmail.com>"]
 edition = "2021"
 license = "MPL-2.0"
-homepage = "https://github.com/BrianShTsoi/memtest"
-repository = "https://github.com/BrianShTsoi/memtest"
+homepage = "https://github.com/mozilla/memtest"
+repository = "https://github.com/mozilla/memtest"
 keywords = ["memory", "stability"]
 readme = "README.md"
 
