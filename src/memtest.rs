@@ -1,20 +1,21 @@
 use {
     crate::{prelude::*, TimeoutChecker},
     rand::random,
+    serde::{Deserialize, Deserializer, Serialize, Serializer},
     std::{error::Error, fmt},
 };
 
 // TODO: Intend to convert this module to a standalone `no_std` crate
 // TODO: TimeoutChecker will be a trait instead
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[must_use]
 pub enum MemtestOutcome {
     Pass,
     Fail(MemtestFailure),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum MemtestFailure {
     /// Failure due to the actual value read being different from the expected value
     UnexpectedValue {
@@ -32,14 +33,44 @@ pub enum MemtestFailure {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum MemtestError {
     Timeout,
+    #[serde(
+        serialize_with = "serialize_memtest_error_other",
+        deserialize_with = "deserialize_memtest_error_other"
+    )]
     Other(anyhow::Error),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum MemtestKind {
+macro_rules! memtest_kinds {{
+    $($variant: ident),* $(,)?
+} => {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum MemtestKind {
+        $($variant,)*
+    }
+
+    impl MemtestKind {
+        pub const ALL: &[Self] = &[
+            $(Self::$variant),*
+        ];
+    }
+
+    impl std::str::FromStr for MemtestKind {
+        type Err = ParseMemtestKindError;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            match s {
+            $(
+                stringify!($variant) => Ok(Self::$variant),
+            )*
+                _ => Err(ParseMemtestKindError),
+            }
+        }
+    }
+}}
+
+memtest_kinds! {
     OwnAddressBasic,
     OwnAddressRepeat,
     RandomVal,
@@ -54,6 +85,9 @@ pub enum MemtestKind {
     Checkerboard,
     BlockSeq,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParseMemtestKindError;
 
 /// Write the address of each memory location to itself, then read back the value and check that it
 /// matches the expected address.
@@ -462,6 +496,14 @@ fn compare_regions(
     Ok(MemtestOutcome::Pass)
 }
 
+impl fmt::Display for ParseMemtestKindError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ParseMemtestKindError {}
+
 impl fmt::Display for MemtestOutcome {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Outcome: {:?}", self)
@@ -487,4 +529,19 @@ impl From<anyhow::Error> for MemtestError {
     fn from(err: anyhow::Error) -> MemtestError {
         MemtestError::Other(err)
     }
+}
+
+fn serialize_memtest_error_other<S>(error: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("{:?}", error))
+}
+
+fn deserialize_memtest_error_other<'de, D>(deserializer: D) -> Result<anyhow::Error, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let str = String::deserialize(deserializer)?;
+    Ok(anyhow!(str))
 }

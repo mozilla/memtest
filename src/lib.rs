@@ -3,9 +3,9 @@ use unix::{memory_lock, memory_resize_and_lock};
 #[cfg(windows)]
 use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
-    memtest::{MemtestError, MemtestKind, MemtestOutcome},
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
+    serde::{Deserialize, Serialize},
     std::{
         error::Error,
         fmt,
@@ -15,6 +15,10 @@ use {
 
 mod memtest;
 mod prelude;
+
+pub use memtest::{
+    MemtestError, MemtestFailure, MemtestKind, MemtestOutcome, ParseMemtestKindError,
+};
 
 #[derive(Debug)]
 pub struct MemtestRunner {
@@ -29,7 +33,7 @@ pub struct MemtestRunner {
 
 // TODO: Replace MemtestRunnerArgs with a Builder struct implementing fluent interface
 /// A set of arguments that define the behavior of MemtestRunner
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct MemtestRunnerArgs {
     /// How long should MemtestRunner run the test suite before timing out
     pub timeout: Duration,
@@ -52,20 +56,20 @@ pub enum MemtestRunnerError {
     Other(anyhow::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MemtestReportList {
     pub tested_mem_length: usize,
     pub mlocked: bool,
     pub reports: Vec<MemtestReport>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MemtestReport {
     pub test_kind: MemtestKind,
     pub outcome: Result<MemtestOutcome, MemtestError>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum MemLockMode {
     Resizable,
     FixedSize,
@@ -103,21 +107,7 @@ struct TimeoutCheckerState {
 impl MemtestRunner {
     /// Create a MemtestRunner containing all test kinds in random order
     pub fn all_tests_random_order(args: &MemtestRunnerArgs) -> MemtestRunner {
-        let mut test_kinds = vec![
-            MemtestKind::OwnAddressBasic,
-            MemtestKind::OwnAddressRepeat,
-            MemtestKind::RandomVal,
-            MemtestKind::Xor,
-            MemtestKind::Sub,
-            MemtestKind::Mul,
-            MemtestKind::Div,
-            MemtestKind::Or,
-            MemtestKind::And,
-            MemtestKind::SeqInc,
-            MemtestKind::SolidBits,
-            MemtestKind::Checkerboard,
-            MemtestKind::BlockSeq,
-        ];
+        let mut test_kinds = MemtestKind::ALL.to_vec();
         test_kinds.shuffle(&mut thread_rng());
 
         Self::from_test_kinds(args, test_kinds)
@@ -183,6 +173,8 @@ impl MemtestRunner {
     /// Run tests
     fn run_tests(&self, memory: &mut [usize], deadline: Instant) -> Vec<MemtestReport> {
         let mut reports = Vec::new();
+        let mut timed_out = false;
+
         for test_kind in &self.test_kinds {
             let test = match test_kind {
                 MemtestKind::OwnAddressBasic => memtest::test_own_address_basic,
@@ -200,7 +192,9 @@ impl MemtestRunner {
                 MemtestKind::BlockSeq => memtest::test_block_seq,
             };
 
-            let test_result = if self.allow_multithread {
+            let test_result = if timed_out {
+                Err(MemtestError::Timeout)
+            } else if self.allow_multithread {
                 std::thread::scope(|scope| {
                     let num_threads = num_cpus::get();
                     let chunk_size = memory.len() / num_threads;
@@ -232,6 +226,7 @@ impl MemtestRunner {
             } else {
                 test(memory, TimeoutChecker::new(deadline))
             };
+            timed_out = matches!(test_result, Err(MemtestError::Timeout));
 
             if matches!(test_result, Ok(MemtestOutcome::Fail(_))) && self.allow_early_termination {
                 reports.push(MemtestReport::new(*test_kind, test_result));
@@ -278,6 +273,14 @@ impl std::str::FromStr for MemLockMode {
         }
     }
 }
+
+impl fmt::Display for ParseMemLockModeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ParseMemLockModeError {}
 
 impl fmt::Display for MemtestReportList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
