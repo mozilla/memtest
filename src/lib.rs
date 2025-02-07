@@ -9,6 +9,7 @@ use {
     std::{
         error::Error,
         fmt,
+        mem::size_of_val,
         time::{Duration, Instant},
     },
 };
@@ -416,11 +417,22 @@ impl TimeoutCheckerState {
         };
 
         let iter_until_next_checkpoint = {
-            let x = duration_until_next_checkpoint.div_duration_f64(avg_iter_duration) as u64;
+            let x =
+                Self::div_duration_f64(duration_until_next_checkpoint, avg_iter_duration) as u64;
             u64::max(x, 1)
         };
 
         self.checkpoint += iter_until_next_checkpoint;
+    }
+
+    // This is equivalent to `Duration::div_duration_f64`, but that is not stable on Rust 1.76
+    fn div_duration_f64(lhs: Duration, rhs: Duration) -> f64 {
+        const NANOS_PER_SEC: u32 = 1_000_000_000;
+        let lhs_nanos =
+            (lhs.as_secs() as f64) * (NANOS_PER_SEC as f64) + (lhs.subsec_nanos() as f64);
+        let rhs_nanos =
+            (rhs.as_secs() as f64) * (NANOS_PER_SEC as f64) + (rhs.subsec_nanos() as f64);
+        lhs_nanos / rhs_nanos
     }
 }
 
@@ -428,6 +440,7 @@ impl TimeoutCheckerState {
 mod windows {
     use {
         crate::{prelude::*, MemLockGuard},
+        std::mem::{size_of, size_of_val},
         windows::Win32::{
             Foundation::ERROR_WORKING_SET_QUOTA,
             System::{
@@ -587,6 +600,7 @@ mod unix {
         std::{
             borrow::BorrowMut,
             io::{Error, ErrorKind},
+            mem::{size_of, size_of_val},
         },
     };
 
