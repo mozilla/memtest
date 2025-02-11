@@ -52,7 +52,7 @@ macro_rules! memtest_kinds {{
     }
 
     impl MemtestKind {
-        pub const ALL: &[Self] = &[
+        pub const ALL: &'static [Self] = &[
             $(Self::$variant),*
         ];
     }
