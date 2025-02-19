@@ -179,27 +179,7 @@ impl MemtestRunner {
         let mut timed_out = false;
 
         for test_kind in &self.test_kinds {
-            let test = match test_kind {
-                MemtestKind::OwnAddressBasic => memtest::test_own_address_basic,
-                MemtestKind::OwnAddressRepeat => memtest::test_own_address_repeat,
-                MemtestKind::RandomVal => memtest::test_random_val,
-                MemtestKind::Xor => memtest::test_xor,
-                MemtestKind::Sub => memtest::test_sub,
-                MemtestKind::Mul => memtest::test_mul,
-                MemtestKind::Div => memtest::test_div,
-                MemtestKind::Or => memtest::test_or,
-                MemtestKind::And => memtest::test_and,
-                MemtestKind::SeqInc => memtest::test_seq_inc,
-                MemtestKind::SolidBits => memtest::test_solid_bits,
-                MemtestKind::Checkerboard => memtest::test_checkerboard,
-                MemtestKind::BlockSeq => memtest::test_block_seq,
-                MemtestKind::MovInvFixedBlock => memtest::test_mov_inv_fixed_block,
-                MemtestKind::MovInvFixedBit => memtest::test_mov_inv_fixed_bit,
-                MemtestKind::MovInvFixedRandom => memtest::test_mov_inv_fixed_random,
-                MemtestKind::MovInvWalk => memtest::test_mov_inv_walk,
-                MemtestKind::MovInvRandom => memtest::test_mov_inv_random,
-                MemtestKind::Modulo20 => memtest::test_modulo_20,
-            };
+            let test = test_kind.to_fn();
 
             let test_result = if timed_out {
                 Err(MemtestError::Observer(TimeoutError))

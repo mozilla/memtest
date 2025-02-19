@@ -102,6 +102,33 @@ memtest_kinds! {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParseMemtestKindError;
 
+impl MemtestKind {
+    // TODO: Use macros to write the match statement
+    pub fn to_fn<O: TestObserver>(self) -> fn(&mut [usize], O) -> MemtestResult<O> {
+        match self {
+            Self::OwnAddressBasic => test_own_address_basic,
+            Self::OwnAddressRepeat => test_own_address_repeat,
+            Self::RandomVal => test_random_val,
+            Self::Xor => test_xor,
+            Self::Sub => test_sub,
+            Self::Mul => test_mul,
+            Self::Div => test_div,
+            Self::Or => test_or,
+            Self::And => test_and,
+            Self::SeqInc => test_seq_inc,
+            Self::SolidBits => test_solid_bits,
+            Self::Checkerboard => test_checkerboard,
+            Self::BlockSeq => test_block_seq,
+            Self::MovInvFixedBlock => test_mov_inv_fixed_block,
+            Self::MovInvFixedBit => test_mov_inv_fixed_bit,
+            Self::MovInvFixedRandom => test_mov_inv_fixed_random,
+            Self::MovInvWalk => test_mov_inv_walk,
+            Self::MovInvRandom => test_mov_inv_random,
+            Self::Modulo20 => test_modulo_20,
+        }
+    }
+}
+
 /// Write the address of each memory location to itself, then read back the value and check that it
 /// matches the expected address.
 #[tracing::instrument(skip_all)]
@@ -879,4 +906,78 @@ where
 {
     let str = String::deserialize(deserializer)?;
     Ok(anyhow!(str))
+}
+
+#[cfg(test)]
+mod test {
+    use {
+        super::{MemtestKind, MemtestOutcome, TestObserver},
+        std::{error::Error, fmt},
+    };
+
+    #[derive(Debug)]
+    struct IterationCounter {
+        expected_iter: Option<u64>,
+        completed_iter: u64,
+    }
+
+    // This is just a place holder, it will never be used.
+    #[derive(Debug)]
+    pub struct IterationError;
+
+    impl TestObserver for &mut IterationCounter {
+        type Error = IterationError;
+
+        fn init(&mut self, expected_iter: u64) {
+            assert!(
+                self.expected_iter.is_none(),
+                "init() should only be called once per test"
+            );
+
+            self.expected_iter = Some(expected_iter);
+        }
+
+        #[inline(always)]
+        fn check(&mut self) -> Result<(), Self::Error> {
+            self.completed_iter += 1;
+            Ok(())
+        }
+    }
+
+    impl IterationCounter {
+        fn new() -> IterationCounter {
+            IterationCounter {
+                expected_iter: None,
+                completed_iter: 0,
+            }
+        }
+
+        fn assert_count(self) {
+            let expected_iter = self.expected_iter.expect("init() should be called");
+            assert_eq!(expected_iter, self.completed_iter);
+        }
+    }
+
+    impl fmt::Display for IterationError {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "{:?}", self)
+        }
+    }
+
+    impl Error for IterationError {}
+
+    #[test]
+    fn test_memtest_expected_iter() {
+        let mut memory = vec![0; 512];
+        for test_kind in MemtestKind::ALL {
+            let mut counter = IterationCounter::new();
+            if !matches!(
+                test_kind.to_fn()(&mut memory, &mut counter).expect("No error should be thrown"),
+                MemtestOutcome::Pass
+            ) {
+                panic!("Memtest should pass");
+            }
+            counter.assert_count();
+        }
+    }
 }
