@@ -41,7 +41,7 @@ pub trait TestObserver {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum MemtestError<E: Error> {
+pub enum MemtestError<E> {
     Observer(E),
     #[serde(
         serialize_with = "serialize_memtest_error_other",
@@ -116,12 +116,12 @@ pub fn test_own_address_basic<O: TestObserver>(
     observer.init(expected_iter);
 
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         write_volatile_safe(mem_ref, address_from_ref(mem_ref));
     }
 
     for mem_ref in memory.iter() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
         let actual = read_volatile_safe(mem_ref);
 
@@ -163,13 +163,13 @@ pub fn test_own_address_repeat<O: TestObserver>(
 
     for i in 0..usize::try_from(NUM_RUNS).unwrap() {
         for (j, mem_ref) in memory.iter_mut().enumerate() {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             let val = val_to_write(address_from_ref(mem_ref), i, j);
             write_volatile_safe(mem_ref, val);
         }
 
         for (j, mem_ref) in memory.iter().enumerate() {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             let address = address_from_ref(mem_ref);
             let expected = val_to_write(address, i, j);
             let actual = read_volatile_safe(mem_ref);
@@ -198,7 +198,7 @@ pub fn test_random_val<O: TestObserver>(memory: &mut [usize], mut observer: O) -
     observer.init(expected_iter);
 
     for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let val = random();
         write_volatile_safe(first_ref, val);
         write_volatile_safe(second_ref, val);
@@ -274,7 +274,7 @@ fn test_two_regions<O: TestObserver>(
     observer.init(expected_iter);
 
     for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
 
         let mixing_val = random();
 
@@ -302,7 +302,7 @@ pub fn test_seq_inc<O: TestObserver>(memory: &mut [usize], mut observer: O) -> M
 
     let mut val: usize = random();
     for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         val = val.wrapping_add(1);
         write_volatile_safe(first_ref, val);
         write_volatile_safe(second_ref, val);
@@ -331,7 +331,7 @@ pub fn test_solid_bits<O: TestObserver>(memory: &mut [usize], mut observer: O) -
         let mut val = solid_bits;
 
         for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             val = !val;
             write_volatile_safe(first_ref, val);
             write_volatile_safe(second_ref, val);
@@ -369,7 +369,7 @@ pub fn test_checkerboard<O: TestObserver>(
         let mut val = checker_board;
 
         for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             val = !val;
             write_volatile_safe(first_ref, val);
             write_volatile_safe(second_ref, val);
@@ -400,7 +400,7 @@ pub fn test_block_seq<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
         let val = usize_filled_from_byte(i);
 
         for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             write_volatile_safe(first_ref, val);
             write_volatile_safe(second_ref, val);
         }
@@ -471,7 +471,7 @@ pub fn test_mov_inv_fixed_bit<O: TestObserver>(
     observer.init(expected_iter);
 
     let mut pattern = usize_filled_from_byte(0x10);
-    for _ in 0..=(u8::try_from(NUM_RUNS - 1).unwrap()) {
+    for _ in 0..NUM_RUNS {
         if let MemtestOutcome::Fail(f) = mov_inv_fixed_pattern(memory, pattern, &mut observer)? {
             return Ok(MemtestOutcome::Fail(f));
         }
@@ -488,7 +488,7 @@ pub fn test_mov_inv_fixed_bit<O: TestObserver>(
 /// to the description available at the [Memtest86+ Test Algorithm Section](https://github.com/
 /// memtest86plus/memtest86plus?tab=readme-ov-file#memtest86-test-algorithms)
 ///
-/// This test runs the moving inversion algorithm with random fixed patterns.
+/// This test runs the moving inversion algorithm with a random fixed pattern.
 #[tracing::instrument(skip_all)]
 pub fn test_mov_inv_fixed_random<O: TestObserver>(
     memory: &mut [usize],
@@ -513,12 +513,12 @@ fn mov_inv_fixed_pattern<O: TestObserver>(
     observer: &mut O,
 ) -> MemtestResult<O> {
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         write_volatile_safe(mem_ref, pattern);
     }
 
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
         let actual = read_volatile_safe(mem_ref);
 
@@ -535,7 +535,7 @@ fn mov_inv_fixed_pattern<O: TestObserver>(
     }
 
     for mem_ref in memory.iter_mut().rev() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
         let actual = read_volatile_safe(mem_ref);
 
@@ -569,21 +569,19 @@ pub fn test_mov_inv_walk<O: TestObserver>(
     memory: &mut [usize],
     mut observer: O,
 ) -> MemtestResult<O> {
-    const NUM_RUNS: usize = size_of::<usize>();
-    let num_runs_u64 = u64::try_from(NUM_RUNS).unwrap();
+    const NUM_RUNS: u32 = usize::BITS;
     let expected_iter = u64::try_from(memory.len())
         .ok()
-        .and_then(|count| count.checked_mul(MOV_INV_ITERATIONS * 2 * num_runs_u64))
+        .and_then(|count| count.checked_mul(MOV_INV_ITERATIONS * 2 * u64::from(NUM_RUNS)))
         .context("Total number of iterations overflowed")?;
     observer.init(expected_iter);
 
-    for i in 0..num_runs_u64 {
+    for i in 0..NUM_RUNS {
         let pattern = 1 << i;
         if let MemtestOutcome::Fail(f) = mov_inv_walking_pattern(memory, pattern, &mut observer)? {
             return Ok(MemtestOutcome::Fail(f));
         }
-        if let MemtestOutcome::Fail(f) = mov_inv_walking_pattern(memory, !(pattern), &mut observer)?
-        {
+        if let MemtestOutcome::Fail(f) = mov_inv_walking_pattern(memory, !pattern, &mut observer)? {
             return Ok(MemtestOutcome::Fail(f));
         }
     }
@@ -597,14 +595,14 @@ fn mov_inv_walking_pattern<O: TestObserver>(
 ) -> MemtestResult<O> {
     let mut pattern = starting_pattern;
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         write_volatile_safe(mem_ref, pattern);
         pattern = pattern.rotate_left(1);
     }
 
     pattern = starting_pattern;
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
         let actual = read_volatile_safe(mem_ref);
 
@@ -623,7 +621,7 @@ fn mov_inv_walking_pattern<O: TestObserver>(
 
     pattern = !pattern;
     for mem_ref in memory.iter_mut().rev() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         pattern = pattern.rotate_right(1);
         let address = address_from_ref(mem_ref);
         let actual = read_volatile_safe(mem_ref);
@@ -672,13 +670,13 @@ pub fn test_mov_inv_random<O: TestObserver>(
 
     let mut rng = SmallRng::from_seed(seed);
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         write_volatile_safe(mem_ref, rng.gen());
     }
 
     let mut rng = SmallRng::from_seed(seed);
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
         let expected = rng.gen();
         let actual = read_volatile_safe(mem_ref);
@@ -697,7 +695,7 @@ pub fn test_mov_inv_random<O: TestObserver>(
 
     let mut rng = SmallRng::from_seed(seed);
     for mem_ref in memory.iter_mut() {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
         let expected = !rng.gen::<usize>();
         let actual = read_volatile_safe(mem_ref);
@@ -721,8 +719,9 @@ pub fn test_mov_inv_random<O: TestObserver>(
 /// memtest86plus/memtest86plus),  which is designed to avoid effects of caching and buffering.
 ///
 /// The test generates a random value, then write the value to every 20th memory location.
-/// Afterwards write the complement of the value to all other locations. Then verify that the values
-/// stored in every 20th location is unchanged.
+/// Afterwards write the complement of the value to all other locations one or more times (twice in
+/// this case). Then verify that the values stored in every 20th location is unchanged.
+///
 /// The procedure is repeated with offsets 0-19 to test all memory locations.
 #[tracing::instrument(skip_all)]
 pub fn test_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
@@ -739,7 +738,7 @@ pub fn test_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
     let pattern = random();
     for offset in 0..STEP {
         for mem_ref in memory.iter_mut().skip(offset).step_by(STEP) {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             write_volatile_safe(mem_ref, pattern);
         }
 
@@ -748,13 +747,13 @@ pub fn test_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
                 if i % STEP == offset {
                     continue;
                 }
-                observer.check().map_err(|e| MemtestError::Observer(e))?;
+                observer.check().map_err(MemtestError::Observer)?;
                 write_volatile_safe(mem_ref, !pattern);
             }
         }
 
         for mem_ref in memory.iter().skip(offset).step_by(STEP) {
-            observer.check().map_err(|e| MemtestError::Observer(e))?;
+            observer.check().map_err(MemtestError::Observer)?;
             let address = address_from_ref(mem_ref);
             let expected = pattern;
             let actual = read_volatile_safe(mem_ref);
@@ -812,7 +811,7 @@ fn compare_regions<O: TestObserver>(
     observer: &mut O,
 ) -> MemtestResult<O> {
     for (ref1, ref2) in region1.iter().zip(region2.iter()) {
-        observer.check().map_err(|e| MemtestError::Observer(e))?;
+        observer.check().map_err(MemtestError::Observer)?;
 
         let address1 = address_from_ref(ref1);
         let address2 = address_from_ref(ref2);
@@ -846,22 +845,22 @@ impl fmt::Display for MemtestOutcome {
     }
 }
 
-impl<E: Error> fmt::Display for MemtestError<E> {
+impl<E: fmt::Debug> fmt::Display for MemtestError<E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Error: {:?}", self)
     }
 }
 
-impl<E: Error> Error for MemtestError<E> {
+impl<E: Error + 'static> Error for MemtestError<E> {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            MemtestError::Observer(_) => None,
+            MemtestError::Observer(err) => Some(err),
             MemtestError::Other(err) => Some(err.as_ref()),
         }
     }
 }
 
-impl<E: Error> From<anyhow::Error> for MemtestError<E> {
+impl<E> From<anyhow::Error> for MemtestError<E> {
     fn from(err: anyhow::Error) -> MemtestError<E> {
         MemtestError::Other(err)
     }

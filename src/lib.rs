@@ -67,7 +67,7 @@ pub struct MemtestReportList {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemtestReport {
     pub test_kind: MemtestKind,
-    pub outcome: MemtestResult<TimeoutChecker>,
+    pub outcome: Result<MemtestOutcome, MemtestError<TimeoutError>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ struct MemLockGuard {
 
 /// A struct to ensure the test timeouts in a given duration
 #[derive(Debug)]
-pub struct TimeoutChecker {
+struct TimeoutChecker {
     deadline: Instant,
     state: Option<TimeoutCheckerState>,
 }
@@ -326,10 +326,7 @@ impl MemtestReportList {
 }
 
 impl MemtestReport {
-    fn new(
-        test_kind: MemtestKind,
-        outcome: Result<MemtestOutcome, MemtestError<TimeoutError>>,
-    ) -> MemtestReport {
+    fn new(test_kind: MemtestKind, outcome: MemtestResult<TimeoutChecker>) -> MemtestReport {
         MemtestReport { test_kind, outcome }
     }
 }
