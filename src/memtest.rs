@@ -684,7 +684,7 @@ pub fn test_mov_inv_random<O: TestObserver>(
     };
     let expected_iter = u64::try_from(memory.len())
         .ok()
-        .and_then(|count| count.checked_mul(MOV_INV_ITERATIONS * 2))
+        .and_then(|count| count.checked_mul(MOV_INV_ITERATIONS))
         .context("Total number of iterations overflowed")?;
     observer.init(expected_iter);
     let seed = {
