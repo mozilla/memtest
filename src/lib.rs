@@ -9,7 +9,6 @@ use {
     std::{
         error::Error,
         fmt,
-        mem::size_of_val,
         time::{Duration, Instant},
     },
 };
@@ -153,7 +152,7 @@ impl MemtestRunner {
         // the memory region and try again
         let _working_set_resize_guard = if self.allow_working_set_resize {
             Some(
-                replace_set_size(size_of_val(memory))
+                replace_set_size(std::mem::size_of_val(memory))
                     .context("Failed to replace process working set size")?,
             )
         } else {
