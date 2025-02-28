@@ -179,8 +179,6 @@ impl MemtestRunner {
         let mut timed_out = false;
 
         for test_kind in &self.test_kinds {
-            let test = test_kind.to_fn();
-
             let test_result = if timed_out {
                 Err(MemtestError::Observer(TimeoutError))
             } else if self.allow_multithread {
@@ -190,7 +188,8 @@ impl MemtestRunner {
 
                     let mut handles = vec![];
                     for chunk in memory.chunks_exact_mut(chunk_size) {
-                        let handle = scope.spawn(|| test(chunk, TimeoutChecker::new(deadline)));
+                        let handle =
+                            scope.spawn(|| test_kind.run(chunk, TimeoutChecker::new(deadline)));
                         handles.push(handle);
                     }
 
@@ -214,7 +213,7 @@ impl MemtestRunner {
                         })
                 })
             } else {
-                test(memory, TimeoutChecker::new(deadline))
+                test_kind.run(memory, TimeoutChecker::new(deadline))
             };
             timed_out = matches!(test_result, Err(MemtestError::Observer(TimeoutError)));
 

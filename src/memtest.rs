@@ -16,7 +16,7 @@ pub enum MemtestOutcome {
     Fail(MemtestFailure),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum MemtestFailure {
     /// Failure due to the actual value read being different from the expected value
     UnexpectedValue {
@@ -103,9 +103,8 @@ memtest_kinds! {
 pub struct ParseMemtestKindError;
 
 impl MemtestKind {
-    // TODO: Use macros to write the match statement
-    pub fn to_fn<O: TestObserver>(self) -> fn(&mut [usize], O) -> MemtestResult<O> {
-        match self {
+    pub fn run<O: TestObserver>(&self, memory: &mut [usize], observer: O) -> MemtestResult<O> {
+        let test = match self {
             Self::OwnAddressBasic => test_own_address_basic,
             Self::OwnAddressRepeat => test_own_address_repeat,
             Self::RandomVal => test_random_val,
@@ -125,7 +124,8 @@ impl MemtestKind {
             Self::MovInvWalk => test_mov_inv_walk,
             Self::MovInvRandom => test_mov_inv_random,
             Self::Modulo20 => test_modulo_20,
-        }
+        };
+        test(memory, observer)
     }
 }
 
@@ -858,6 +858,35 @@ fn compare_regions<O: TestObserver>(
     Ok(MemtestOutcome::Pass)
 }
 
+impl fmt::Debug for MemtestFailure {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::UnexpectedValue {
+                address,
+                expected,
+                actual,
+            } => f
+                .debug_struct("UnexpectedValue")
+                .field("address", &format_args!("0x{:x}", address))
+                .field("expected", &format_args!("0x{:x}", expected))
+                .field("actual", &format_args!("0x{:x}", actual))
+                .finish(),
+            Self::MismatchedValues {
+                address1,
+                value1,
+                address2,
+                value2,
+            } => f
+                .debug_struct("MismatchedValues")
+                .field("address1", &format_args!("0x{:x}", address1))
+                .field("value1", &format_args!("0x{:x}", value1))
+                .field("address2", &format_args!("0x{:x}", address2))
+                .field("value2", &format_args!("0x{:x}", value2))
+                .finish(),
+        }
+    }
+}
+
 impl fmt::Display for ParseMemtestKindError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
@@ -912,7 +941,7 @@ where
 mod test {
     use {
         super::{MemtestKind, MemtestOutcome, TestObserver},
-        std::{error::Error, fmt},
+        std::convert::Infallible,
     };
 
     #[derive(Debug)]
@@ -921,12 +950,8 @@ mod test {
         completed_iter: u64,
     }
 
-    // This is just a place holder, it will never be used.
-    #[derive(Debug)]
-    pub struct IterationError;
-
     impl TestObserver for &mut IterationCounter {
-        type Error = IterationError;
+        type Error = Infallible;
 
         fn init(&mut self, expected_iter: u64) {
             assert!(
@@ -958,25 +983,18 @@ mod test {
         }
     }
 
-    impl fmt::Display for IterationError {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            write!(f, "{:?}", self)
-        }
-    }
-
-    impl Error for IterationError {}
-
     #[test]
     fn test_memtest_expected_iter() {
         let mut memory = vec![0; 512];
         for test_kind in MemtestKind::ALL {
             let mut counter = IterationCounter::new();
-            if !matches!(
-                test_kind.to_fn()(&mut memory, &mut counter).expect("No error should be thrown"),
-                MemtestOutcome::Pass
-            ) {
-                panic!("Memtest should pass");
-            }
+            assert!(
+                matches!(
+                    test_kind.run(&mut memory, &mut counter),
+                    Ok(MemtestOutcome::Pass),
+                ),
+                "Memtest should pass"
+            );
             counter.assert_count();
         }
     }
