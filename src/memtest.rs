@@ -867,9 +867,9 @@ impl fmt::Debug for MemtestFailure {
                 actual,
             } => f
                 .debug_struct("UnexpectedValue")
-                .field("address", &format_args!("0x{:x}", address))
-                .field("expected", &format_args!("0x{:x}", expected))
-                .field("actual", &format_args!("0x{:x}", actual))
+                .field("address", &format_args!("0x{address:x}"))
+                .field("expected", &format_args!("0x{expected:x}"))
+                .field("actual", &format_args!("0x{actual:x}"))
                 .finish(),
             Self::MismatchedValues {
                 address1,
@@ -878,10 +878,10 @@ impl fmt::Debug for MemtestFailure {
                 value2,
             } => f
                 .debug_struct("MismatchedValues")
-                .field("address1", &format_args!("0x{:x}", address1))
-                .field("value1", &format_args!("0x{:x}", value1))
-                .field("address2", &format_args!("0x{:x}", address2))
-                .field("value2", &format_args!("0x{:x}", value2))
+                .field("address1", &format_args!("0x{address1:x}"))
+                .field("value1", &format_args!("0x{value1:x}"))
+                .field("address2", &format_args!("0x{address2:x}"))
+                .field("value2", &format_args!("0x{value2:x}"))
                 .finish(),
         }
     }
