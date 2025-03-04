@@ -95,6 +95,7 @@ memtest_kinds! {
     MovInvFixedBit,
     MovInvFixedRandom,
     MovInvWalk,
+    BlockMove,
     MovInvRandom,
     Modulo20,
 }
@@ -122,6 +123,7 @@ impl MemtestKind {
             Self::MovInvFixedBit => test_mov_inv_fixed_bit,
             Self::MovInvFixedRandom => test_mov_inv_fixed_random,
             Self::MovInvWalk => test_mov_inv_walk,
+            Self::BlockMove => test_block_move,
             Self::MovInvRandom => test_mov_inv_random,
             Self::Modulo20 => test_modulo_20,
         };
@@ -665,6 +667,116 @@ fn mov_inv_walking_pattern<O: TestObserver>(
         write_volatile_safe(mem_ref, !pattern);
     }
     Ok(MemtestOutcome::Pass)
+}
+
+/// This test adapts the block move test algorithm implemented by [memtest86+](https://github.com/
+/// memtest86plus/memtest86plus). For a detailed explanation of the algorithm, please refer to
+/// the description available at the [Memtest86+ Test Algorithm Section](https://github.com/
+/// memtest86plus/memtest86plus?tab=readme-ov-file#memtest86-test-algorithms)
+///
+/// The test aims to stress test the memory by moving blocks of memory, such as with the `movs` instruction.
+/// It first initializes the memory with an irregular shifting pattern. Then it performs 3 memory block moves.
+/// 1. Copy the first half of the memory region to the second half
+/// 2. Copy the second half of the memory region back to the first half, offset by 8 locations.
+///    ie. Copy the second half - the last 8 locations, to the first half's original location + 8
+/// 3. Copy the second half's last 8 locations to teh first half's first 8 locations
+/// Finally, the test verifies that the second half has the values of the original first half, and
+/// the first half's values are right rotated by 8 locations
+///
+/// Note that the original implementation in Memtest86+ only verifies the values by comparing
+/// neighbouring pairs of memory location. Instead of that, this implementation verifies by
+/// recalculating the expected pattern in each location.
+#[tracing::instrument(skip_all)]
+pub fn test_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
+    const CHUNK_SIZE: usize = 16;
+    const OFFSET: usize = 8;
+    if memory.len() < CHUNK_SIZE {
+        Err(anyhow!("Insufficient memory length for Block Move Test"))?;
+    }
+
+    // TODO:
+    // This expected_iter does not account for the copy slice part, as `Observer::check()` is not
+    // called in there
+    let expected_iter = u64::try_from(memory.len())
+        .ok()
+        .and_then(|count| count.checked_mul(2))
+        .context("Total number of iterations overflowed")?;
+    observer.init(expected_iter);
+
+    let val_to_write = |pattern: usize, idx| match idx {
+        4 | 5 | 10 | 11 | 14 | 15 => !pattern,
+        _ => pattern,
+    };
+
+    // Set up initial pattern in memory
+    let mut pattern = 1;
+    for chunk in memory.chunks_exact_mut(CHUNK_SIZE) {
+        for (i, mem_ref) in chunk.iter_mut().enumerate() {
+            observer.check().map_err(MemtestError::Observer)?;
+
+            let val = val_to_write(pattern, i);
+            write_volatile_safe(mem_ref, val);
+        }
+        pattern = pattern.rotate_left(1);
+    }
+
+    // Move blocks of memory around
+    let (first_half, second_half) = split_slice_in_half(memory)?;
+    let half_len = first_half.len();
+    volatile_copy_slice(second_half, first_half);
+    volatile_copy_slice(
+        &mut first_half[OFFSET..],
+        &second_half[..(half_len - OFFSET)],
+    );
+    volatile_copy_slice(
+        &mut first_half[..OFFSET],
+        &second_half[(half_len - OFFSET)..],
+    );
+
+    // Verify that values stored after block move are as expected, by traversing both halves at the
+    // same time (with first half rotated by OFFSET), as they have the same expected values
+    let mut pattern = 1;
+    for (chunk1, chunk2) in [&first_half[OFFSET..], &first_half[..OFFSET]]
+        .concat()
+        .chunks(CHUNK_SIZE)
+        .zip(second_half.chunks(CHUNK_SIZE))
+    {
+        for (i, (mem_ref1, mem_ref2)) in chunk1.iter().zip(chunk2.iter()).enumerate() {
+            let expected = val_to_write(pattern, i);
+
+            for mem_ref in [mem_ref1, mem_ref2] {
+                observer.check().map_err(MemtestError::Observer)?;
+
+                let address = address_from_ref(mem_ref);
+                let actual = read_volatile_safe(mem_ref);
+                if actual != expected {
+                    info!("Test failed at 0x{address:x}");
+                    return Ok(MemtestOutcome::Fail(MemtestFailure::UnexpectedValue {
+                        address,
+                        expected,
+                        actual,
+                    }));
+                }
+            }
+        }
+        pattern = pattern.rotate_left(1);
+    }
+
+    Ok(MemtestOutcome::Pass)
+}
+
+// TODO: In Memtest86+, block move is achieved with the `movs` assembly instruction
+fn volatile_copy_slice<T: Copy>(dst: &mut [T], src: &[T]) {
+    assert_eq!(
+        dst.len(),
+        src.len(),
+        "length of dst and src should be equal"
+    );
+
+    for (dst_ref, src_ref) in dst.iter_mut().zip(src.iter()) {
+        let val = read_volatile_safe(src_ref);
+        write_volatile_safe(dst_ref, val);
+    }
 }
 
 /// This test adapts the moving inversion algorithm implemented by [memtest86+](https://github.com/
