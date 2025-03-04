@@ -679,13 +679,18 @@ fn mov_inv_walking_pattern<O: TestObserver>(
 /// 1. Copy the first half of the memory region to the second half
 /// 2. Copy the second half of the memory region back to the first half, offset by 8 locations.
 ///    ie. Copy the second half - the last 8 locations, to the first half's original location + 8
-/// 3. Copy the second half's last 8 locations to teh first half's first 8 locations
+/// 3. Copy the second half's last 8 locations to the first half's first 8 locations
 /// Finally, the test verifies that the second half has the values of the original first half, and
 /// the first half's values are right rotated by 8 locations
 ///
 /// Note that the original implementation in Memtest86+ only verifies the values by comparing
 /// neighbouring pairs of memory location. Instead of that, this implementation verifies by
 /// recalculating the expected pattern in each location.
+///
+/// Also note that unlike the other memory tests, `Observer::check()` is only called in the initial
+/// loop for initalizing memory and the final loop for verifying values. It is not called during the
+/// memory block moves, as it intefere with the stress testing of memory. Unfortunately, this means
+/// that `Observer::check()` will not be called for a siginficant duration of the test run time.
 #[tracing::instrument(skip_all)]
 pub fn test_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
     const CHUNK_SIZE: usize = 16;
@@ -694,9 +699,6 @@ pub fn test_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -
         Err(anyhow!("Insufficient memory length for Block Move Test"))?;
     }
 
-    // TODO:
-    // This expected_iter does not account for the copy slice part, as `Observer::check()` is not
-    // called in there
     let expected_iter = u64::try_from(memory.len())
         .ok()
         .and_then(|count| count.checked_mul(2))
