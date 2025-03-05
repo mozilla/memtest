@@ -5,7 +5,7 @@ use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
-    serde::{Deserialize, Serialize},
+    serde::{de, Deserialize, Deserializer, Serialize, Serializer},
     std::{
         error::Error,
         fmt,
@@ -104,7 +104,7 @@ struct TimeoutCheckerState {
     checkpoint: u64,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TimeoutError;
 
 impl MemtestRunner {
@@ -435,6 +435,29 @@ impl fmt::Display for TimeoutError {
 }
 
 impl Error for TimeoutError {}
+
+impl Serialize for TimeoutError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("{:?}", self))
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeoutError {
+    fn deserialize<D>(deserializer: D) -> Result<TimeoutError, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        if str == "TimeoutError" {
+            Ok(TimeoutError)
+        } else {
+            Err(de::Error::custom("Expected struct TimeoutError"))
+        }
+    }
+}
 
 #[cfg(windows)]
 mod windows {
