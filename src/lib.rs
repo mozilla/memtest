@@ -5,7 +5,7 @@ use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
-    serde::{de, Deserialize, Deserializer, Serialize, Serializer},
+    serde::{Deserialize, Serialize},
     std::{
         error::Error,
         fmt,
@@ -104,8 +104,13 @@ struct TimeoutCheckerState {
     checkpoint: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct TimeoutError;
+/// This is an enum instead of an empty struct so that the serial representation shows
+/// "TimeoutError" instead of "null"
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimeoutError {
+    TimeoutError,
+}
+use TimeoutError::TimeoutError as Timeout;
 
 impl MemtestRunner {
     /// Create a MemtestRunner containing all test kinds in random order
@@ -180,7 +185,7 @@ impl MemtestRunner {
 
         for test_kind in &self.test_kinds {
             let test_result = if timed_out {
-                Err(MemtestError::Observer(TimeoutError))
+                Err(MemtestError::Observer(Timeout))
             } else if self.allow_multithread {
                 std::thread::scope(|scope| {
                     let num_threads = num_cpus::get();
@@ -205,8 +210,9 @@ impl MemtestRunner {
                             use {MemtestError::*, MemtestOutcome::*};
                             match (acc, result) {
                                 (Err(Other(e)), _) | (_, Err(Other(e))) => Err(Other(e)),
-                                (Err(Observer(TimeoutError)), _)
-                                | (_, Err(Observer(TimeoutError))) => Err(Observer(TimeoutError)),
+                                (Err(Observer(Timeout)), _) | (_, Err(Observer(Timeout))) => {
+                                    Err(Observer(Timeout))
+                                }
                                 (Ok(Fail(f)), _) | (_, Ok(Fail(f))) => Ok(Fail(f)),
                                 _ => Ok(Pass),
                             }
@@ -215,7 +221,7 @@ impl MemtestRunner {
             } else {
                 test_kind.run(memory, TimeoutChecker::new(deadline))
             };
-            timed_out = matches!(test_result, Err(MemtestError::Observer(TimeoutError)));
+            timed_out = matches!(test_result, Err(MemtestError::Observer(Timeout)));
 
             if matches!(test_result, Ok(MemtestOutcome::Fail(_))) && self.allow_early_termination {
                 reports.push(MemtestReport::new(*test_kind, test_result));
@@ -370,7 +376,7 @@ impl TimeoutCheckerState {
     fn on_checkpoint(&mut self, deadline: Instant) -> Result<(), TimeoutError> {
         let current_time = Instant::now();
         if current_time >= deadline {
-            return Err(TimeoutError);
+            return Err(Timeout);
         }
 
         self.trace_progress();
@@ -435,29 +441,6 @@ impl fmt::Display for TimeoutError {
 }
 
 impl Error for TimeoutError {}
-
-impl Serialize for TimeoutError {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&format!("{:?}", self))
-    }
-}
-
-impl<'de> Deserialize<'de> for TimeoutError {
-    fn deserialize<D>(deserializer: D) -> Result<TimeoutError, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let str = String::deserialize(deserializer)?;
-        if str == "TimeoutError" {
-            Ok(TimeoutError)
-        } else {
-            Err(de::Error::custom("Expected struct TimeoutError"))
-        }
-    }
-}
 
 #[cfg(windows)]
 mod windows {
