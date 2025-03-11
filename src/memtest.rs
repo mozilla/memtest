@@ -794,28 +794,26 @@ pub fn test_mov_inv_random<O: TestObserver>(
 ) -> MemtestResult<O> {
     use {
         rand::{rngs::SmallRng, Rng, SeedableRng},
-        std::time::Instant,
+        std::time::{SystemTime, UNIX_EPOCH},
     };
     let expected_iter = u64::try_from(memory.len())
         .ok()
         .and_then(|count| count.checked_mul(MOV_INV_ITERATIONS))
         .context("Total number of iterations overflowed")?;
     observer.init(expected_iter);
-    let seed = {
-        let time_bytes = Instant::now().elapsed().as_nanos().to_le_bytes();
-        let mut seed = [0; 32];
-        seed[0..16].copy_from_slice(&time_bytes);
-        seed[16..32].copy_from_slice(&time_bytes);
-        seed
-    };
 
-    let mut rng = SmallRng::from_seed(seed);
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    let mut rng = SmallRng::seed_from_u64(seed);
     for mem_ref in memory.iter_mut() {
         observer.check().map_err(MemtestError::Observer)?;
         write_volatile_safe(mem_ref, rng.gen());
     }
 
-    let mut rng = SmallRng::from_seed(seed);
+    let mut rng = SmallRng::seed_from_u64(seed);
     for mem_ref in memory.iter_mut() {
         observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
@@ -834,7 +832,7 @@ pub fn test_mov_inv_random<O: TestObserver>(
         write_volatile_safe(mem_ref, !expected);
     }
 
-    let mut rng = SmallRng::from_seed(seed);
+    let mut rng = SmallRng::seed_from_u64(seed);
     for mem_ref in memory.iter_mut() {
         observer.check().map_err(MemtestError::Observer)?;
         let address = address_from_ref(mem_ref);
