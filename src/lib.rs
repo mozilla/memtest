@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use unix::{memory_lock, memory_resize_and_lock, PageFaultChecker};
 #[cfg(windows)]
-use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
+use windows::{memory_lock, memory_resize_and_lock, replace_set_size, PageFaultChecker};
 use {
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
@@ -12,8 +12,6 @@ use {
         time::{Duration, Instant},
     },
 };
-
-// TODO: Add PageFaultChecker for Windows
 
 mod memtest;
 mod prelude;
@@ -533,7 +531,10 @@ impl Error for TimeoutError {}
 mod windows {
     use {
         crate::{prelude::*, MemLockGuard},
-        std::mem::{size_of, size_of_val},
+        std::{
+            convert::Infallible,
+            mem::{size_of, size_of_val},
+        },
         windows::Win32::{
             Foundation::ERROR_WORKING_SET_QUOTA,
             System::{
@@ -547,6 +548,9 @@ mod windows {
             },
         },
     };
+
+    #[derive(Debug)]
+    pub(super) struct PageFaultChecker {}
 
     #[derive(Debug)]
     pub struct WorkingSetResizeGuard {
@@ -682,6 +686,22 @@ mod windows {
                 .context("Failed to get global memory status")?
         };
         Ok(memory_status.ullTotalPhys.try_into().unwrap())
+    }
+
+    impl PageFaultChecker {
+        pub(super) fn new(_ptr: *mut usize, _len: usize) -> PageFaultChecker {
+            PageFaultChecker {}
+        }
+    }
+
+    impl super::memtest::TestObserver for PageFaultChecker {
+        type Error = Infallible;
+
+        fn init(&mut self, _expected_iter: u64) {}
+
+        fn check(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 }
 
