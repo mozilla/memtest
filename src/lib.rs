@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use unix::{memory_lock, memory_resize_and_lock};
+use unix::{memory_lock, memory_resize_and_lock, PageFaultChecker};
 #[cfg(windows)]
 use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
@@ -12,6 +12,8 @@ use {
         time::{Duration, Instant},
     },
 };
+
+// TODO: Add PageFaultChecker for Windows
 
 mod memtest;
 mod prelude;
@@ -66,13 +68,14 @@ pub struct MemtestReportList {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemtestReport {
     pub test_kind: MemtestKind,
-    pub outcome: Result<MemtestOutcome, MemtestError<TimeoutError>>,
+    pub outcome: Result<MemtestOutcome, MemtestError<RuntimeError>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum MemLockMode {
     Resizable,
     FixedSize,
+    PageFaultChecking,
     Disabled,
 }
 
@@ -87,6 +90,18 @@ pub const MIN_MEMORY_LENGTH: usize = 512;
 struct MemLockGuard {
     base_ptr: *mut usize,
     mem_size: usize,
+}
+
+#[derive(Debug)]
+struct RuntimeChecker {
+    timeout_checker: TimeoutChecker,
+    page_fault_checker: Option<PageFaultChecker>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeError {
+    Timeout,
+    PageFault,
 }
 
 /// A struct to ensure the test timeouts in a given duration
@@ -106,11 +121,8 @@ struct TimeoutCheckerState {
 
 /// This is an enum instead of an empty struct so that the serial representation shows
 /// "TimeoutError" instead of "null"
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimeoutError {
-    TimeoutError,
-}
-use TimeoutError::TimeoutError as Timeout;
+#[derive(Debug, PartialEq, Eq)]
+struct TimeoutError;
 
 impl MemtestRunner {
     /// Create a MemtestRunner containing all test kinds in random order
@@ -144,7 +156,10 @@ impl MemtestRunner {
 
         let deadline = Instant::now() + self.timeout;
 
-        if matches!(self.mem_lock_mode, MemLockMode::Disabled) {
+        if matches!(
+            self.mem_lock_mode,
+            MemLockMode::Disabled | MemLockMode::PageFaultChecking
+        ) {
             return Ok(MemtestReportList {
                 tested_mem_length: memory.len(),
                 mlocked: false,
@@ -185,7 +200,7 @@ impl MemtestRunner {
 
         for test_kind in &self.test_kinds {
             let test_result = if timed_out {
-                Err(MemtestError::Observer(Timeout))
+                Err(MemtestError::Observer(RuntimeError::Timeout))
             } else if self.allow_multithread {
                 std::thread::scope(|scope| {
                     let num_threads = num_cpus::get();
@@ -193,8 +208,20 @@ impl MemtestRunner {
 
                     let mut handles = vec![];
                     for chunk in memory.chunks_exact_mut(chunk_size) {
-                        let handle =
-                            scope.spawn(|| test_kind.run(chunk, TimeoutChecker::new(deadline)));
+                        let timeout_checker = TimeoutChecker::new(deadline);
+                        let page_fault_checker =
+                            if matches!(self.mem_lock_mode, MemLockMode::PageFaultChecking) {
+                                Some(PageFaultChecker::new(chunk.as_mut_ptr(), chunk.len()))
+                            } else {
+                                None
+                            };
+
+                        let handle = scope.spawn(move || {
+                            test_kind.run(
+                                chunk,
+                                RuntimeChecker::new(timeout_checker, page_fault_checker),
+                            )
+                        });
                         handles.push(handle);
                     }
 
@@ -210,18 +237,30 @@ impl MemtestRunner {
                             use {MemtestError::*, MemtestOutcome::*};
                             match (acc, result) {
                                 (Err(Other(e)), _) | (_, Err(Other(e))) => Err(Other(e)),
-                                (Err(Observer(Timeout)), _) | (_, Err(Observer(Timeout))) => {
-                                    Err(Observer(Timeout))
-                                }
                                 (Ok(Fail(f)), _) | (_, Ok(Fail(f))) => Ok(Fail(f)),
+                                (Err(Observer(e)), _) | (_, Err(Observer(e))) => Err(Observer(e)),
                                 _ => Ok(Pass),
                             }
                         })
                 })
             } else {
-                test_kind.run(memory, TimeoutChecker::new(deadline))
+                let timeout_checker = TimeoutChecker::new(deadline);
+                let page_fault_checker =
+                    if matches!(self.mem_lock_mode, MemLockMode::PageFaultChecking) {
+                        Some(PageFaultChecker::new(memory.as_mut_ptr(), memory.len()))
+                    } else {
+                        None
+                    };
+
+                test_kind.run(
+                    memory,
+                    RuntimeChecker::new(timeout_checker, page_fault_checker),
+                )
             };
-            timed_out = matches!(test_result, Err(MemtestError::Observer(Timeout)));
+            timed_out = matches!(
+                test_result,
+                Err(MemtestError::Observer(RuntimeError::Timeout))
+            );
 
             if matches!(test_result, Ok(MemtestOutcome::Fail(_))) && self.allow_early_termination {
                 reports.push(MemtestReport::new(*test_kind, test_result));
@@ -263,6 +302,7 @@ impl std::str::FromStr for MemLockMode {
         match s {
             "resizable" => Ok(Self::Resizable),
             "fixedsize" => Ok(Self::FixedSize),
+            "pagefaultchecking" => Ok(Self::PageFaultChecking),
             "disabled" => Ok(Self::Disabled),
             _ => Err(ParseMemLockModeError),
         }
@@ -304,16 +344,62 @@ impl MemtestReportList {
 
     /// Returns true if all tests were run successfully and all tests passed
     pub fn all_pass(&self) -> bool {
-        self.iter()
+        self.reports
+            .iter()
             .all(|report| matches!(report.outcome, Ok(MemtestOutcome::Pass)))
     }
 }
 
 impl MemtestReport {
-    fn new(test_kind: MemtestKind, outcome: MemtestResult<TimeoutChecker>) -> MemtestReport {
+    fn new(test_kind: MemtestKind, outcome: MemtestResult<RuntimeChecker>) -> MemtestReport {
         MemtestReport { test_kind, outcome }
     }
 }
+
+impl RuntimeChecker {
+    fn new(
+        timeout_checker: TimeoutChecker,
+        page_fault_checker: Option<PageFaultChecker>,
+    ) -> RuntimeChecker {
+        RuntimeChecker {
+            timeout_checker,
+            page_fault_checker,
+        }
+    }
+}
+
+impl memtest::TestObserver for RuntimeChecker {
+    type Error = RuntimeError;
+
+    /// This function should be called in the beginning of a memtest.
+    fn init(&mut self, expected_iter: u64) {
+        self.timeout_checker.init(expected_iter);
+        if let Some(page_fault_checker) = &mut self.page_fault_checker {
+            page_fault_checker.init(expected_iter);
+        }
+    }
+
+    #[inline(always)]
+    fn check(&mut self) -> Result<(), Self::Error> {
+        self.timeout_checker
+            .check()
+            .map_err(|_| RuntimeError::Timeout)?;
+        if let Some(page_fault_checker) = &mut self.page_fault_checker {
+            page_fault_checker
+                .check()
+                .map_err(|_| RuntimeError::PageFault)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for RuntimeError {}
 
 impl TimeoutChecker {
     fn new(deadline: Instant) -> TimeoutChecker {
@@ -376,7 +462,7 @@ impl TimeoutCheckerState {
     fn on_checkpoint(&mut self, deadline: Instant) -> Result<(), TimeoutError> {
         let current_time = Instant::now();
         if current_time >= deadline {
-            return Err(Timeout);
+            return Err(TimeoutError);
         }
 
         self.trace_progress();
@@ -386,6 +472,7 @@ impl TimeoutCheckerState {
         Ok(())
     }
 
+    // TODO: Consider separating this functionality to a `ProgressTracer`
     // Note: Because `trace_progress()` is only called in `on_checkpoints()`, not every percent
     // of the test progress is traced. If memtests are running way ahead of the given deadline, the
     // progress may only be traced once or twice. Although this makes the logs less comprehensive,
@@ -605,10 +692,28 @@ mod unix {
         libc::{getrlimit, mlock, munlock, rlimit, sysconf, RLIMIT_MEMLOCK, _SC_PAGESIZE},
         std::{
             borrow::BorrowMut,
-            io::{Error, ErrorKind},
+            error, fmt,
+            io::{self, ErrorKind},
             mem::{size_of, size_of_val},
         },
     };
+
+    #[derive(Debug)]
+    pub(super) struct PageFaultChecker {
+        ptr: *mut usize,
+        len: usize,
+        state: Option<PageFaultCheckerState>,
+    }
+
+    #[derive(Debug)]
+    struct PageFaultCheckerState {
+        completed_iter: u64,
+        checkpoint: u64,
+        checkpoint_step: u64,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) struct PageFaultError;
 
     pub(super) fn memory_lock(
         memory: &mut [usize],
@@ -625,7 +730,7 @@ mod unix {
                 },
             ))
         } else {
-            Err(anyhow!(Error::last_os_error()).context("mlock failed"))
+            Err(anyhow!(io::Error::last_os_error()).context("mlock failed"))
         }
     }
 
@@ -653,7 +758,7 @@ mod unix {
                 return Ok((memory, MemLockGuard { base_ptr, mem_size }));
             }
 
-            let e = Error::last_os_error();
+            let e = io::Error::last_os_error();
             ensure!(
                 e.kind() == ErrorKind::OutOfMemory,
                 anyhow!(e).context("mlock failed")
@@ -677,7 +782,7 @@ mod unix {
         fn drop(&mut self) {
             unsafe {
                 if munlock(self.base_ptr.cast(), self.mem_size) != 0 {
-                    warn!("Failed to unlock memory: {}", Error::last_os_error())
+                    warn!("Failed to unlock memory: {}", io::Error::last_os_error())
                 }
             }
         }
@@ -688,7 +793,7 @@ mod unix {
             let mut rlim: rlimit = std::mem::zeroed();
             ensure!(
                 getrlimit(RLIMIT_MEMLOCK, rlim.borrow_mut()) == 0,
-                anyhow!(Error::last_os_error()).context("Failed to get RLIMIT_MEMLOCK")
+                anyhow!(io::Error::last_os_error()).context("Failed to get RLIMIT_MEMLOCK")
             );
             Ok(rlim.rlim_cur.try_into().unwrap())
         }
@@ -699,4 +804,99 @@ mod unix {
             .try_into()
             .context("Failed to get page size")
     }
+
+    impl PageFaultChecker {
+        pub(super) fn new(ptr: *mut usize, len: usize) -> PageFaultChecker {
+            PageFaultChecker {
+                ptr,
+                len,
+                state: None,
+            }
+        }
+    }
+
+    unsafe impl Send for PageFaultChecker {}
+
+    impl super::memtest::TestObserver for PageFaultChecker {
+        type Error = PageFaultError;
+
+        // TODO: Currently NUM_CHECKS is an arbitrary number
+        fn init(&mut self, expected_iter: u64) {
+            const FIRST_CHECKPOINT: u64 = 0;
+            const NUM_CHECKS: u64 = 100;
+
+            assert!(
+                self.state.is_none(),
+                "init() should only be called once per test"
+            );
+
+            self.state = Some(PageFaultCheckerState {
+                completed_iter: 0,
+                checkpoint: FIRST_CHECKPOINT,
+                checkpoint_step: expected_iter / NUM_CHECKS,
+            });
+        }
+
+        #[inline(always)]
+        fn check(&mut self) -> Result<(), Self::Error> {
+            let state = self
+                .state
+                .as_mut()
+                .expect("init() should be called before check()");
+
+            if state.completed_iter < state.checkpoint {
+                state.completed_iter += 1;
+                return Ok(());
+            }
+
+            state.on_checkpoint(self.ptr, self.len)
+        }
+    }
+
+    impl PageFaultCheckerState {
+        fn on_checkpoint(&mut self, ptr: *mut usize, len: usize) -> Result<(), PageFaultError> {
+            use libc::mincore;
+
+            unsafe {
+                let page_size = get_page_size().unwrap();
+                let base_address = ptr as usize;
+                let mem_size = len * size_of::<usize>();
+
+                let aligned_address = base_address & !(page_size - 1);
+                let aligned_ptr = (aligned_address as *mut usize).cast();
+                let aligned_mem_size = mem_size + (base_address - aligned_address);
+
+                // buf needs to be at least (aligned_mem_size + page_size - 1) / page_size
+                let mut buf: Vec<u8> = vec![0; aligned_mem_size.div_ceil(page_size)];
+                assert_eq!(
+                    mincore(aligned_ptr, aligned_mem_size, buf.as_mut_ptr().cast()),
+                    -1,
+                    "mincore returned -1"
+                );
+                if buf.iter().any(|n| *n == 0) {
+                    trace!("Detected page fault");
+                    return Err(PageFaultError);
+                }
+            }
+
+            self.set_next_checkpoint();
+            self.completed_iter += 1;
+
+            Ok(())
+        }
+
+        /// Calculate the remaining time before the deadline and schedule the next check at 75% of that
+        /// interval, then estimate the number of iterations to get there and set as next checkpoint
+        fn set_next_checkpoint(&mut self) {
+            self.checkpoint += self.checkpoint_step;
+        }
+    }
+
+    impl fmt::Display for PageFaultError {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "{:?}", self)
+        }
+    }
+
+    impl error::Error for PageFaultError {}
 }
