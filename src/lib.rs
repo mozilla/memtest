@@ -890,8 +890,8 @@ mod unix {
                 let mut buf: Vec<u8> = vec![0; aligned_mem_size.div_ceil(page_size)];
                 assert_eq!(
                     mincore(aligned_ptr, aligned_mem_size, buf.as_mut_ptr().cast()),
-                    -1,
-                    "mincore returned -1"
+                    0,
+                    "mincore did not return 0"
                 );
                 if buf.iter().any(|n| *n == 0) {
                     trace!("Detected page fault");
