@@ -248,7 +248,7 @@ impl MemtestRunner {
             match PageFaultChecker::new(memory.as_mut_ptr() as usize, memory.len()) {
                 Ok(page_fault_checker) => test_kind.run(
                     memory,
-                    RuntimeChecker::new(timeout_checker, page_fault_checker),
+                    unix::RuntimeChecker::new(timeout_checker, page_fault_checker),
                 ),
                 Err(e) => Err(MemtestError::Other(e)),
             }
@@ -277,7 +277,7 @@ impl MemtestRunner {
                 Ok(page_fault_checker) => scope.spawn(move || {
                     test_kind.run(
                         memory,
-                        RuntimeChecker::new(timeout_checker, page_fault_checker),
+                        unix::RuntimeChecker::new(timeout_checker, page_fault_checker),
                     )
                 }),
                 Err(e) => scope.spawn(|| Err(MemtestError::Other(e))),
@@ -664,7 +664,7 @@ mod windows {
 #[cfg(unix)]
 mod unix {
     use {
-        crate::{memtest::TestObserver, prelude::*, MemLockGuard, RuntimeError},
+        crate::{memtest::TestObserver, prelude::*, MemLockGuard, RuntimeError, TimeoutChecker},
         libc::{getrlimit, mlock, munlock, rlimit, sysconf, RLIMIT_MEMLOCK, _SC_PAGESIZE},
         std::{
             borrow::BorrowMut,
@@ -674,7 +674,7 @@ mod unix {
     };
 
     #[derive(Debug)]
-    struct RuntimeChecker {
+    pub(super) struct RuntimeChecker {
         timeout_checker: TimeoutChecker,
         page_fault_checker: PageFaultChecker,
     }
@@ -785,7 +785,7 @@ mod unix {
     }
 
     impl RuntimeChecker {
-        fn new(
+        pub(super) fn new(
             timeout_checker: TimeoutChecker,
             page_fault_checker: PageFaultChecker,
         ) -> RuntimeChecker {
@@ -796,7 +796,7 @@ mod unix {
         }
     }
 
-    impl memtest::TestObserver for RuntimeChecker {
+    impl TestObserver for RuntimeChecker {
         type Error = RuntimeError;
 
         /// This function should be called in the beginning of a memtest.
