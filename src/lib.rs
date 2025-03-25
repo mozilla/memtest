@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use unix::{memory_lock, memory_resize_and_lock, PageFaultChecker};
 #[cfg(windows)]
-use windows::{memory_lock, memory_resize_and_lock, replace_set_size, PageFaultChecker};
+use windows::{memory_lock, memory_resize_and_lock, replace_set_size};
 use {
     prelude::*,
     rand::{seq::SliceRandom, thread_rng},
