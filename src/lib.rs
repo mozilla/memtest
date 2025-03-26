@@ -195,7 +195,7 @@ impl MemtestRunner {
 
                     let mut handles = vec![];
                     for chunk in memory.chunks_exact_mut(chunk_size) {
-                        handles.push(self.run_test_with_scope(*test_kind, chunk, deadline, scope));
+                        handles.push(scope.spawn(|| self.run_test(*test_kind, chunk, deadline)));
                     }
 
                     #[allow(clippy::manual_try_fold)]
@@ -245,13 +245,12 @@ impl MemtestRunner {
 
         #[cfg(unix)]
         if matches!(self.mem_lock_mode, MemLockMode::PageFaultChecking) {
-            match PageFaultChecker::new(memory.as_mut_ptr() as usize, memory.len()) {
-                Ok(page_fault_checker) => test_kind.run(
-                    memory,
-                    unix::RuntimeChecker::new(timeout_checker, page_fault_checker),
-                ),
-                Err(e) => Err(MemtestError::Other(e)),
-            }
+            let runtime_checker = unix::RuntimeChecker::new(
+                timeout_checker,
+                PageFaultChecker::new(memory.as_mut_ptr() as usize, memory.len())
+                    .map_err(MemtestError::Other)?,
+            );
+            test_kind.run(memory, runtime_checker)
         } else {
             test_kind.run(memory, timeout_checker)
         }
@@ -259,36 +258,6 @@ impl MemtestRunner {
         // PageFaultChecker is not implemented for Windows
         #[cfg(windows)]
         test_kind.run(memory, timeout_checker)
-    }
-
-    fn run_test_with_scope<'a, 'scope>(
-        &self,
-        test_kind: MemtestKind,
-        memory: &'a mut [usize],
-        deadline: Instant,
-        scope: &'scope std::thread::Scope<'scope, 'a>,
-    ) -> std::thread::ScopedJoinHandle<'scope, Result<MemtestOutcome, MemtestError<RuntimeError>>>
-    {
-        let timeout_checker = TimeoutChecker::new(deadline);
-
-        #[cfg(unix)]
-        if matches!(self.mem_lock_mode, MemLockMode::PageFaultChecking) {
-            match PageFaultChecker::new(memory.as_mut_ptr() as usize, memory.len()) {
-                Ok(page_fault_checker) => scope.spawn(move || {
-                    test_kind.run(
-                        memory,
-                        unix::RuntimeChecker::new(timeout_checker, page_fault_checker),
-                    )
-                }),
-                Err(e) => scope.spawn(|| Err(MemtestError::Other(e))),
-            }
-        } else {
-            scope.spawn(move || test_kind.run(memory, timeout_checker))
-        }
-
-        // PageFaultChecker is not implemented for Windows
-        #[cfg(windows)]
-        scope.spawn(move || test_kind.run(memory, timeout_checker))
     }
 }
 
@@ -883,7 +852,7 @@ mod unix {
             assert_eq!(
                 unsafe {
                     mincore(
-                        (aligned_address as *mut usize).cast(),
+                        aligned_address as *mut std::ffi::c_void,
                         aligned_mem_size,
                         buf.as_mut_ptr().cast(),
                     )
