@@ -105,29 +105,481 @@ pub struct ParseMemtestKindError;
 
 impl MemtestKind {
     pub fn run<O: TestObserver>(&self, memory: &mut [usize], observer: O) -> MemtestResult<O> {
-        let test = match self {
-            Self::OwnAddressBasic => test_own_address_basic,
-            Self::OwnAddressRepeat => test_own_address_repeat,
-            Self::RandomVal => test_random_val,
-            Self::Xor => test_xor,
-            Self::Sub => test_sub,
-            Self::Mul => test_mul,
-            Self::Div => test_div,
-            Self::Or => test_or,
-            Self::And => test_and,
-            Self::SeqInc => test_seq_inc,
-            Self::SolidBits => test_solid_bits,
-            Self::Checkerboard => test_checkerboard,
-            Self::BlockSeq => test_block_seq,
-            Self::MovInvFixedBlock => test_mov_inv_fixed_block,
-            Self::MovInvFixedBit => test_mov_inv_fixed_bit,
-            Self::MovInvFixedRandom => test_mov_inv_fixed_random,
-            Self::MovInvWalk => test_mov_inv_walk,
-            Self::BlockMove => test_block_move,
-            Self::MovInvRandom => test_mov_inv_random,
-            Self::Modulo20 => test_modulo_20,
+        use mov_inv::{
+            MovInvFixedBit, MovInvFixedBlock, MovInvFixedRandom, MovInvRandom, MovInvWalk,
         };
-        test(memory, observer)
+
+        match self {
+            Self::OwnAddressBasic => run_test_algorithm(OwnAddressBasic::new(), memory, observer),
+            Self::OwnAddressRepeat => run_test_algorithm(OwnAddressRepeat::new(), memory, observer),
+            Self::RandomVal => test_random_val(memory, observer),
+            Self::Xor => test_xor(memory, observer),
+            Self::Sub => test_sub(memory, observer),
+            Self::Mul => test_mul(memory, observer),
+            Self::Div => test_div(memory, observer),
+            Self::Or => test_or(memory, observer),
+            Self::And => test_and(memory, observer),
+            Self::SeqInc => test_seq_inc(memory, observer),
+            Self::SolidBits => test_solid_bits(memory, observer),
+            Self::Checkerboard => test_checkerboard(memory, observer),
+            Self::BlockSeq => test_block_seq(memory, observer),
+            Self::MovInvFixedBlock => run_test_algorithm(MovInvFixedBlock::new(), memory, observer),
+            Self::MovInvFixedBit => run_test_algorithm(MovInvFixedBit::new(), memory, observer),
+            Self::MovInvFixedRandom => {
+                run_test_algorithm(MovInvFixedRandom::new(), memory, observer)
+            }
+            Self::MovInvWalk => run_test_algorithm(MovInvWalk::new(), memory, observer),
+            Self::BlockMove => test_block_move(memory, observer),
+            Self::MovInvRandom => run_test_algorithm(MovInvRandom::new(), memory, observer),
+            Self::Modulo20 => test_modulo_20(memory, observer),
+        }
+    }
+}
+
+/// A pass can be done forward (default) or reversed
+#[derive(Debug, Default)]
+enum PassDirection {
+    #[default]
+    Forward,
+    Reverse,
+}
+
+type PassFn<T> = fn(&mut T, direction: &mut PassDirection) -> IterFn<T>;
+type IterFn<T> = fn(&mut T, &mut usize) -> Result<(), MemtestFailure>;
+
+trait TestAlgorithm {
+    /// The number of runs the algorithm needs. Most tests can just accept the default of '1'
+    fn num_runs(&self) -> u64 {
+        1
+    }
+    /// Initialize the state for the run given by `run_idx`. Most tests don't need to do anything.
+    fn start_run(&mut self, _run_idx: u64) {}
+    /// Return a list of functions defining the behavior of the passes
+    ///
+    /// Each function receives a mutable reference to `direction`, which will always be set to
+    /// the default of `Forward`. If a pass wants the direction reversed, it can set it to
+    /// `Reverse`.
+    ///
+    /// Each function must return the iteration function for the pass. This is the function that
+    /// will be run for each memory address.
+    ///
+    /// The iteration function itself takes a mutable reference to each memory address and
+    /// returns either `Ok(())` or `Err(MemtestFailure)`.
+    fn passes(&self) -> Vec<PassFn<Self>>;
+}
+
+// TODO: Fix logging
+#[tracing::instrument(skip_all)]
+fn run_test_algorithm<T: TestAlgorithm, O: TestObserver>(
+    mut test: T,
+    memory: &mut [usize],
+    mut observer: O,
+) -> MemtestResult<O> {
+    let expected_iter = u64::try_from(memory.len())
+        .ok()
+        .and_then(|count| count.checked_mul(test.num_runs()))
+        .and_then(|count| count.checked_mul(u64::try_from(test.passes().len()).ok()?))
+        .context("Total number of iterations overflowed")?;
+    observer.init(expected_iter);
+
+    for i in 0..test.num_runs() {
+        test.start_run(i);
+        for pass_fn in test.passes() {
+            let mut direction = PassDirection::default();
+            let iter_fn = pass_fn(&mut test, &mut direction);
+
+            let mem_iter: Box<dyn Iterator<Item = &mut usize>> = match direction {
+                PassDirection::Forward => Box::new(memory.iter_mut()),
+                PassDirection::Reverse => Box::new(memory.iter_mut().rev()),
+            };
+
+            for mem_ref in mem_iter {
+                observer.check().map_err(MemtestError::Observer)?;
+                if let Err(f) = iter_fn(&mut test, mem_ref) {
+                    return Ok(MemtestOutcome::Fail(f));
+                }
+            }
+        }
+    }
+    Ok(MemtestOutcome::Pass)
+}
+
+fn assert_expected_value(
+    address: usize,
+    expected: usize,
+    actual: usize,
+) -> Result<(), MemtestFailure> {
+    if actual != expected {
+        info!("Test failed at 0x{address:x}");
+        Err(MemtestFailure::UnexpectedValue {
+            address,
+            expected,
+            actual,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Write the address of each memory location to itself, then read back the value and check that it
+/// matches the expected address.
+struct OwnAddressBasic {}
+
+impl TestAlgorithm for OwnAddressBasic {
+    fn passes(&self) -> Vec<PassFn<Self>> {
+        vec![Self::pass_0, Self::pass_1]
+    }
+}
+
+impl OwnAddressBasic {
+    fn new() -> Self {
+        OwnAddressBasic {}
+    }
+
+    fn pass_0(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+        |_state, mem_ref| {
+            write_volatile_safe(mem_ref, address_from_ref(mem_ref));
+            Ok(())
+        }
+    }
+
+    fn pass_1(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+        |_state, mem_ref| {
+            assert_expected_value(
+                address_from_ref(mem_ref),
+                address_from_ref(mem_ref),
+                read_volatile_safe(mem_ref),
+            )
+        }
+    }
+}
+
+/// Write the address of each memory location (or its complement) to itself, then read back the
+/// value and check that it matches the expected address.
+/// This procedure is repeated 16 times.
+struct OwnAddressRepeat {
+    complement: bool,
+    run_idx: u64,
+}
+
+impl TestAlgorithm for OwnAddressRepeat {
+    fn num_runs(&self) -> u64 {
+        16
+    }
+    fn start_run(&mut self, run_idx: u64) {
+        self.run_idx = run_idx;
+    }
+    fn passes(&self) -> Vec<PassFn<Self>> {
+        vec![Self::pass_0, Self::pass_1]
+    }
+}
+
+impl OwnAddressRepeat {
+    fn new() -> Self {
+        OwnAddressRepeat {
+            complement: false,
+            run_idx: 0,
+        }
+    }
+
+    fn pass_0(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+        self.init_complement();
+
+        |state, mem_ref| {
+            write_volatile_safe(mem_ref, state.val_to_write(mem_ref));
+
+            state.complement = !state.complement;
+            Ok(())
+        }
+    }
+
+    fn pass_1(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+        self.init_complement();
+
+        |state, mem_ref| {
+            assert_expected_value(
+                address_from_ref(mem_ref),
+                state.val_to_write(mem_ref),
+                read_volatile_safe(mem_ref),
+            )?;
+
+            state.complement = !state.complement;
+            Ok(())
+        }
+    }
+
+    fn init_complement(&mut self) {
+        self.complement = self.run_idx % 2 != 0;
+    }
+
+    fn val_to_write(&self, mem_ref: &usize) -> usize {
+        if self.complement {
+            !address_from_ref(mem_ref)
+        } else {
+            address_from_ref(mem_ref)
+        }
+    }
+}
+
+mod mov_inv {
+    use {
+        super::{
+            address_from_ref, assert_expected_value, read_volatile_safe, usize_filled_from_byte,
+            write_volatile_safe, IterFn, PassDirection, PassFn, TestAlgorithm,
+        },
+        rand::{random, rngs::SmallRng, Rng, SeedableRng},
+        std::time::{SystemTime, UNIX_EPOCH},
+    };
+
+    pub(super) type MovInvFixedBlock = MovInv<FixedBlock>;
+    pub(super) type MovInvFixedBit = MovInv<FixedBit>;
+    pub(super) type MovInvFixedRandom = MovInv<FixedRandom>;
+    pub(super) type MovInvWalk = MovInv<Walk>;
+    pub(super) type MovInvRandom = MovInv<Random>;
+
+    pub(super) trait MovInvAlgorithm {
+        fn new() -> Self;
+
+        fn num_runs(&self) -> u64;
+
+        fn start_run(&mut self, _run_idx: u64);
+
+        fn start_pass(&mut self);
+
+        fn generate_pattern(&mut self) -> usize;
+    }
+
+    pub(super) struct MovInv<T> {
+        algorithm: T,
+    }
+
+    impl<T: MovInvAlgorithm> TestAlgorithm for MovInv<T> {
+        fn num_runs(&self) -> u64 {
+            self.algorithm.num_runs()
+        }
+        fn start_run(&mut self, run_idx: u64) {
+            self.algorithm.start_run(run_idx)
+        }
+        fn passes(&self) -> Vec<PassFn<Self>> {
+            vec![Self::pass_0, Self::pass_1, Self::pass_2]
+        }
+    }
+
+    impl<T: MovInvAlgorithm> MovInv<T> {
+        pub(super) fn new() -> Self {
+            Self {
+                algorithm: T::new(),
+            }
+        }
+
+        fn pass_0(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+            self.algorithm.start_pass();
+            |state, mem_ref| {
+                let pattern = state.algorithm.generate_pattern();
+                write_volatile_safe(mem_ref, pattern);
+                Ok(())
+            }
+        }
+
+        fn pass_1(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+            self.algorithm.start_pass();
+
+            |state, mem_ref| {
+                let pattern = state.algorithm.generate_pattern();
+                assert_expected_value(
+                    address_from_ref(mem_ref),
+                    pattern,
+                    read_volatile_safe(mem_ref),
+                )?;
+
+                write_volatile_safe(mem_ref, !pattern);
+                Ok(())
+            }
+        }
+
+        // FIXME: start_pass & generate pattern need more consideration. The test is going in reverse
+        fn pass_2(&mut self, direction: &mut PassDirection) -> IterFn<Self> {
+            self.algorithm.start_pass();
+            *direction = PassDirection::Reverse;
+
+            |state, mem_ref| {
+                let pattern = state.algorithm.generate_pattern();
+                assert_expected_value(
+                    address_from_ref(mem_ref),
+                    !pattern,
+                    read_volatile_safe(mem_ref),
+                )?;
+
+                write_volatile_safe(mem_ref, pattern);
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) struct FixedBlock {
+        run_idx: u64,
+    }
+
+    impl MovInvAlgorithm for FixedBlock {
+        fn new() -> Self {
+            FixedBlock { run_idx: 0 }
+        }
+
+        fn num_runs(&self) -> u64 {
+            2
+        }
+
+        fn start_run(&mut self, run_idx: u64) {
+            self.run_idx = run_idx;
+        }
+
+        fn start_pass(&mut self) {}
+
+        fn generate_pattern(&mut self) -> usize {
+            if self.run_idx == 0 {
+                0
+            } else {
+                !0
+            }
+        }
+    }
+
+    pub(super) struct FixedBit {
+        run_idx: u64,
+        pattern: usize,
+    }
+
+    impl MovInvAlgorithm for FixedBit {
+        fn new() -> Self {
+            FixedBit {
+                run_idx: 0,
+                pattern: usize_filled_from_byte(0x01),
+            }
+        }
+
+        fn num_runs(&self) -> u64 {
+            16
+        }
+
+        fn start_run(&mut self, run_idx: u64) {
+            self.run_idx = run_idx;
+            if run_idx % 2 == 0 {
+                self.pattern = self.pattern.rotate_right(1);
+            }
+        }
+
+        fn start_pass(&mut self) {}
+
+        fn generate_pattern(&mut self) -> usize {
+            if self.run_idx % 2 == 0 {
+                self.pattern
+            } else {
+                !self.pattern
+            }
+        }
+    }
+
+    pub(super) struct FixedRandom {
+        run_idx: u64,
+        pattern: usize,
+    }
+
+    impl MovInvAlgorithm for FixedRandom {
+        fn new() -> Self {
+            FixedRandom {
+                run_idx: 0,
+                pattern: random(),
+            }
+        }
+
+        fn num_runs(&self) -> u64 {
+            2
+        }
+
+        fn start_run(&mut self, run_idx: u64) {
+            self.run_idx = run_idx;
+        }
+
+        fn start_pass(&mut self) {}
+
+        fn generate_pattern(&mut self) -> usize {
+            if self.run_idx % 2 == 0 {
+                self.pattern
+            } else {
+                !self.pattern
+            }
+        }
+    }
+
+    pub(super) struct Walk {
+        run_idx: u64,
+        starting_pattern: usize,
+        pattern: usize,
+    }
+
+    impl MovInvAlgorithm for Walk {
+        fn new() -> Self {
+            Walk {
+                run_idx: 0,
+                starting_pattern: 0,
+                pattern: 0,
+            }
+        }
+
+        fn num_runs(&self) -> u64 {
+            u64::from(usize::BITS) * 2
+        }
+
+        fn start_run(&mut self, run_idx: u64) {
+            self.run_idx = run_idx;
+            self.starting_pattern = 1 << (run_idx / 2);
+        }
+
+        fn start_pass(&mut self) {
+            self.pattern = self.starting_pattern;
+        }
+
+        fn generate_pattern(&mut self) -> usize {
+            let pattern = if self.run_idx % 2 == 0 {
+                self.pattern
+            } else {
+                !self.pattern
+            };
+            self.pattern = self.pattern.rotate_left(1);
+            pattern
+        }
+    }
+
+    pub(super) struct Random {
+        seed: u64,
+        rng: SmallRng,
+    }
+
+    impl MovInvAlgorithm for Random {
+        fn new() -> Self {
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            Random {
+                seed,
+                rng: SmallRng::seed_from_u64(seed),
+            }
+        }
+
+        fn num_runs(&self) -> u64 {
+            1
+        }
+
+        fn start_run(&mut self, _run_idx: u64) {}
+
+        fn start_pass(&mut self) {
+            self.rng = SmallRng::seed_from_u64(self.seed);
+        }
+
+        fn generate_pattern(&mut self) -> usize {
+            self.rng.gen()
+        }
     }
 }
 
@@ -1105,7 +1557,8 @@ mod test {
                     test_kind.run(&mut memory, &mut counter),
                     Ok(MemtestOutcome::Pass),
                 ),
-                "Memtest should pass"
+                "{:?} should pass",
+                test_kind
             );
             counter.assert_count();
         }
