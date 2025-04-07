@@ -335,7 +335,7 @@ mod mov_inv {
     pub(super) type MovInvFixedBit = MovInv<FixedBit>;
     pub(super) type MovInvFixedRandom = MovInv<FixedRandom>;
     pub(super) type MovInvWalk = MovInv<Walk>;
-    pub(super) type MovInvRandom = MovInv<Random>;
+    // pub(super) type MovInvRandom = MovInv<Random>;
 
     pub(super) trait MovInvAlgorithm {
         fn new() -> Self;
@@ -344,9 +344,13 @@ mod mov_inv {
 
         fn start_run(&mut self, _run_idx: u64);
 
-        fn start_pass(&mut self);
+        // This is mainly only used for setting a new pattern in pass 2 (traversing memory in
+        // reverse)
+        fn start_pass(&mut self, _pass_idx: u64) {}
 
         fn generate_pattern(&mut self) -> usize;
+
+        fn backtrack_pattern(&mut self) -> usize;
     }
 
     pub(super) struct MovInv<T> {
@@ -373,7 +377,7 @@ mod mov_inv {
         }
 
         fn pass_0(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
-            self.algorithm.start_pass();
+            self.algorithm.start_pass(0);
             |state, mem_ref| {
                 let pattern = state.algorithm.generate_pattern();
                 write_volatile_safe(mem_ref, pattern);
@@ -382,7 +386,7 @@ mod mov_inv {
         }
 
         fn pass_1(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
-            self.algorithm.start_pass();
+            self.algorithm.start_pass(1);
 
             |state, mem_ref| {
                 let pattern = state.algorithm.generate_pattern();
@@ -397,20 +401,19 @@ mod mov_inv {
             }
         }
 
-        // FIXME: start_pass & generate pattern need more consideration. The test is going in reverse
         fn pass_2(&mut self, direction: &mut PassDirection) -> IterFn<Self> {
-            self.algorithm.start_pass();
+            self.algorithm.start_pass(2);
             *direction = PassDirection::Reverse;
 
             |state, mem_ref| {
-                let pattern = state.algorithm.generate_pattern();
+                let pattern = !state.algorithm.backtrack_pattern();
                 assert_expected_value(
                     address_from_ref(mem_ref),
-                    !pattern,
+                    pattern,
                     read_volatile_safe(mem_ref),
                 )?;
 
-                write_volatile_safe(mem_ref, pattern);
+                write_volatile_safe(mem_ref, !pattern);
                 Ok(())
             }
         }
@@ -433,9 +436,17 @@ mod mov_inv {
             self.run_idx = run_idx;
         }
 
-        fn start_pass(&mut self) {}
-
         fn generate_pattern(&mut self) -> usize {
+            self.pattern()
+        }
+
+        fn backtrack_pattern(&mut self) -> usize {
+            self.pattern()
+        }
+    }
+
+    impl FixedBlock {
+        fn pattern(&mut self) -> usize {
             if self.run_idx == 0 {
                 0
             } else {
@@ -468,9 +479,17 @@ mod mov_inv {
             }
         }
 
-        fn start_pass(&mut self) {}
-
         fn generate_pattern(&mut self) -> usize {
+            self.pattern()
+        }
+
+        fn backtrack_pattern(&mut self) -> usize {
+            self.pattern()
+        }
+    }
+
+    impl FixedBit {
+        fn pattern(&mut self) -> usize {
             if self.run_idx % 2 == 0 {
                 self.pattern
             } else {
@@ -500,9 +519,17 @@ mod mov_inv {
             self.run_idx = run_idx;
         }
 
-        fn start_pass(&mut self) {}
-
         fn generate_pattern(&mut self) -> usize {
+            self.pattern()
+        }
+
+        fn backtrack_pattern(&mut self) -> usize {
+            self.pattern()
+        }
+    }
+
+    impl FixedRandom {
+        fn pattern(&mut self) -> usize {
             if self.run_idx % 2 == 0 {
                 self.pattern
             } else {
@@ -535,8 +562,11 @@ mod mov_inv {
             self.starting_pattern = 1 << (run_idx / 2);
         }
 
-        fn start_pass(&mut self) {
-            self.pattern = self.starting_pattern;
+        fn start_pass(&mut self, pass_idx: u64) {
+            // For pass_idx == 2, pattern is not reset
+            if pass_idx == 0 || pass_idx == 1 {
+                self.pattern = self.starting_pattern;
+            }
         }
 
         fn generate_pattern(&mut self) -> usize {
@@ -548,37 +578,92 @@ mod mov_inv {
             self.pattern = self.pattern.rotate_left(1);
             pattern
         }
+
+        fn backtrack_pattern(&mut self) -> usize {
+            self.pattern = self.pattern.rotate_right(1);
+            if self.run_idx % 2 == 0 {
+                self.pattern
+            } else {
+                !self.pattern
+            }
+        }
     }
 
-    pub(super) struct Random {
+    // Despite its name, this implementation (which follows the Memtest86+ implementation) is not
+    // similar to other moving inversion tests. Due to its nature of using random numbers for each
+    // address, pass 2 does not traverse the memory in reverse.
+    // TODO: Consider using a reversible RNG to match other moving inversion tests
+    // See https://stackoverflow.com/questions/31513168/finding-inverse-operation-to-george-marsaglias-xorshift-rng
+    // and https://stackoverflow.com/questions/31521910/simplify-the-inverse-of-z-x-x-y-function/31522122#31522122
+    // for XORshift, which is the RNG used in Memtest86+
+    pub(super) struct MovInvRandom {
         seed: u64,
         rng: SmallRng,
     }
 
-    impl MovInvAlgorithm for Random {
-        fn new() -> Self {
+    impl TestAlgorithm for MovInvRandom {
+        fn passes(&self) -> Vec<PassFn<Self>> {
+            vec![Self::pass_0, Self::pass_1, Self::pass_2]
+        }
+    }
+
+    impl MovInvRandom {
+        pub(super) fn new() -> Self {
             let seed = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            Random {
+            MovInvRandom {
                 seed,
                 rng: SmallRng::seed_from_u64(seed),
             }
         }
 
-        fn num_runs(&self) -> u64 {
-            1
+        fn pass_0(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+            self.reset_rng();
+
+            |state, mem_ref| {
+                let pattern = state.rng.gen();
+                write_volatile_safe(mem_ref, pattern);
+
+                Ok(())
+            }
         }
 
-        fn start_run(&mut self, _run_idx: u64) {}
+        fn pass_1(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+            self.reset_rng();
 
-        fn start_pass(&mut self) {
+            |state, mem_ref| {
+                let pattern = state.rng.gen();
+                assert_expected_value(
+                    address_from_ref(mem_ref),
+                    pattern,
+                    read_volatile_safe(mem_ref),
+                )?;
+
+                write_volatile_safe(mem_ref, !pattern);
+                Ok(())
+            }
+        }
+
+        fn pass_2(&mut self, _direction: &mut PassDirection) -> IterFn<Self> {
+            self.reset_rng();
+
+            |state, mem_ref| {
+                let pattern = !state.rng.gen::<usize>();
+                assert_expected_value(
+                    address_from_ref(mem_ref),
+                    pattern,
+                    read_volatile_safe(mem_ref),
+                )?;
+
+                write_volatile_safe(mem_ref, !pattern);
+                Ok(())
+            }
+        }
+
+        fn reset_rng(&mut self) {
             self.rng = SmallRng::seed_from_u64(self.seed);
-        }
-
-        fn generate_pattern(&mut self) -> usize {
-            self.rng.gen()
         }
     }
 }
@@ -1201,15 +1286,12 @@ pub fn test_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -
             for mem_ref in [mem_ref1, mem_ref2] {
                 observer.check().map_err(MemtestError::Observer)?;
 
-                let address = address_from_ref(mem_ref);
-                let actual = read_volatile_safe(mem_ref);
-                if actual != expected {
-                    info!("Test failed at 0x{address:x}");
-                    return Ok(MemtestOutcome::Fail(MemtestFailure::UnexpectedValue {
-                        address,
-                        expected,
-                        actual,
-                    }));
+                if let Err(f) = assert_expected_value(
+                    address_from_ref(mem_ref),
+                    expected,
+                    read_volatile_safe(mem_ref),
+                ) {
+                    return Ok(MemtestOutcome::Fail(f));
                 }
             }
         }
@@ -1345,17 +1427,13 @@ pub fn test_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
 
         for mem_ref in memory.iter().skip(offset).step_by(STEP) {
             observer.check().map_err(MemtestError::Observer)?;
-            let address = address_from_ref(mem_ref);
-            let expected = pattern;
-            let actual = read_volatile_safe(mem_ref);
 
-            if actual != expected {
-                info!("Test failed at 0x{address:x}");
-                return Ok(MemtestOutcome::Fail(MemtestFailure::UnexpectedValue {
-                    address,
-                    expected,
-                    actual,
-                }));
+            if let Err(f) = assert_expected_value(
+                address_from_ref(memref),
+                pattern,
+                read_volatile_safe(mem_ref),
+            ) {
+                return Ok(MemtestOutcome::Fail(f));
             }
         }
     }
