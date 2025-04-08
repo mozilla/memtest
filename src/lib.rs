@@ -506,8 +506,10 @@ mod windows {
         const ESTIMATED_TEST_MEM_USAGE: usize = 1024 * 1024; // 1MiB
         let (min_set_size, max_set_size) = get_set_size()?;
         let new_min_set_size = memsize + ESTIMATED_TEST_MEM_USAGE;
-        let new_max_set_size =
-            get_physical_memory_size().context("Failed to get physical memory size")?;
+        let new_max_set_size: usize = get_physical_memory_size()
+            .context("Failed to get physical memory size")?
+            .try_into()
+            .unwrap_or(usize::MAX);
         unsafe {
             SetProcessWorkingSetSize(GetCurrentProcess(), new_min_set_size, new_max_set_size)
                 .context("Failed to set process working set size")?;
@@ -619,14 +621,14 @@ mod windows {
         .unwrap())
     }
 
-    fn get_physical_memory_size() -> anyhow::Result<usize> {
+    fn get_physical_memory_size() -> anyhow::Result<u64> {
         let mut memory_status = MEMORYSTATUSEX::default();
         memory_status.dwLength = std::mem::size_of_val(&memory_status).try_into().unwrap();
         unsafe {
             GlobalMemoryStatusEx(&mut memory_status)
                 .context("Failed to get global memory status")?
         };
-        Ok(memory_status.ullTotalPhys.try_into().unwrap())
+        Ok(memory_status.ullTotalPhys)
     }
 }
 
