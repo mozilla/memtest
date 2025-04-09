@@ -1429,7 +1429,7 @@ pub fn test_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
             observer.check().map_err(MemtestError::Observer)?;
 
             if let Err(f) = assert_expected_value(
-                address_from_ref(memref),
+                address_from_ref(mem_ref),
                 pattern,
                 read_volatile_safe(mem_ref),
             ) {
