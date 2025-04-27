@@ -7,8 +7,7 @@ use {
     rand::{seq::SliceRandom, thread_rng},
     serde::{Deserialize, Serialize},
     std::{
-        error::Error,
-        fmt,
+        error, fmt,
         time::{Duration, Instant},
     },
 };
@@ -16,13 +15,11 @@ use {
 mod memtest;
 mod prelude;
 
-pub use memtest::{
-    MemtestError, MemtestFailure, MemtestKind, MemtestOutcome, MemtestResult, ParseMemtestKindError,
-};
+pub use memtest::{Error, Failure, Outcome, ParseTestKindError, TestKind, TestResult};
 
 #[derive(Debug)]
-pub struct MemtestRunner {
-    test_kinds: Vec<MemtestKind>,
+pub struct Runner {
+    test_kinds: Vec<TestKind>,
     timeout: Duration,
     mem_lock_mode: MemLockMode,
     #[allow(dead_code)]
@@ -31,42 +28,42 @@ pub struct MemtestRunner {
     allow_early_termination: bool,
 }
 
-// TODO: Replace MemtestRunnerArgs with a Builder struct implementing fluent interface
-/// A set of arguments that define the behavior of MemtestRunner
+// TODO: Replace RunnerArgs with a Builder struct implementing fluent interface
+/// A set of arguments that define the behavior of Runner
 #[derive(Serialize, Deserialize, Debug)]
-pub struct MemtestRunnerArgs {
-    /// How long should MemtestRunner run the test suite before timing out
+pub struct RunnerArgs {
+    /// How long should Runner run the test suite before timing out
     pub timeout: Duration,
     /// Whether memory will be locked before testing and whether the requested memory size of
     /// testing can be reduced to accomodate memory locking
-    /// If memory locking failed but is required, MemtestRunner returns with error
+    /// If memory locking failed but is required, Runner returns with error
     pub mem_lock_mode: MemLockMode,
     /// Whether the process working set can be resized to accomodate memory locking
     /// This argument is only meaningful for Windows
     pub allow_working_set_resize: bool,
     /// Whether mulithreading is enabled
     pub allow_multithread: bool,
-    /// Whether MemtestRunner returns immediately if a test fails or continues until all tests are run
+    /// Whether Runner returns immediately if a test fails or continues until all tests are run
     pub allow_early_termination: bool,
 }
 
 #[derive(Debug)]
-pub enum MemtestRunnerError {
+pub enum RunnerError {
     MemLockFailed(anyhow::Error),
     Other(anyhow::Error),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct MemtestReportList {
+pub struct TestReportList {
     pub tested_mem_length: usize,
     pub mlocked: bool,
-    pub reports: Vec<MemtestReport>,
+    pub reports: Vec<TestReport>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct MemtestReport {
-    pub test_kind: MemtestKind,
-    pub outcome: Result<MemtestOutcome, MemtestError<RuntimeError>>,
+pub struct TestReport {
+    pub test_kind: TestKind,
+    pub outcome: Result<Outcome, memtest::Error<RuntimeError>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -80,7 +77,7 @@ pub enum MemLockMode {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParseMemLockModeError;
 
-/// The minimum memory length (in usize) for MemtestRunner to run tests on
+/// The minimum memory length (in usize) for Runner to run tests on
 /// On a 64-bit machine, this is the size of a page
 pub const MIN_MEMORY_LENGTH: usize = 512;
 
@@ -111,21 +108,18 @@ struct TimeoutCheckerState {
     checkpoint: u64,
 }
 
-impl MemtestRunner {
-    /// Create a MemtestRunner containing all test kinds in random order
-    pub fn all_tests_random_order(args: &MemtestRunnerArgs) -> MemtestRunner {
-        let mut test_kinds = MemtestKind::ALL.to_vec();
+impl Runner {
+    /// Create a Runner containing all test kinds in random order
+    pub fn all_tests_random_order(args: &RunnerArgs) -> Runner {
+        let mut test_kinds = TestKind::ALL.to_vec();
         test_kinds.shuffle(&mut thread_rng());
 
         Self::from_test_kinds(args, test_kinds)
     }
 
-    /// Create a MemtestRunner with specified test kinds
-    pub fn from_test_kinds(
-        args: &MemtestRunnerArgs,
-        test_kinds: Vec<MemtestKind>,
-    ) -> MemtestRunner {
-        MemtestRunner {
+    /// Create a Runner with specified test kinds
+    pub fn from_test_kinds(args: &RunnerArgs, test_kinds: Vec<TestKind>) -> Runner {
+        Runner {
             test_kinds,
             timeout: args.timeout,
             mem_lock_mode: args.mem_lock_mode,
@@ -136,7 +130,7 @@ impl MemtestRunner {
     }
 
     /// Run the tests, possibly after locking the memory
-    pub fn run(&self, memory: &mut [usize]) -> Result<MemtestReportList, MemtestRunnerError> {
+    pub fn run(&self, memory: &mut [usize]) -> Result<TestReportList, RunnerError> {
         if memory.len() < MIN_MEMORY_LENGTH {
             return Err(anyhow!("Insufficient memory length").into());
         }
@@ -147,7 +141,7 @@ impl MemtestRunner {
             self.mem_lock_mode,
             MemLockMode::Disabled | MemLockMode::PageFaultChecking
         ) {
-            return Ok(MemtestReportList {
+            return Ok(TestReportList {
                 tested_mem_length: memory.len(),
                 mlocked: false,
                 reports: self.run_tests(memory, deadline),
@@ -171,9 +165,9 @@ impl MemtestRunner {
             MemLockMode::Resizable => memory_resize_and_lock(memory),
             _ => unreachable!(),
         }
-        .map_err(MemtestRunnerError::MemLockFailed)?;
+        .map_err(RunnerError::MemLockFailed)?;
 
-        Ok(MemtestReportList {
+        Ok(TestReportList {
             tested_mem_length: memory.len(),
             mlocked: true,
             reports: self.run_tests(memory, deadline),
@@ -181,13 +175,13 @@ impl MemtestRunner {
     }
 
     /// Run tests
-    fn run_tests(&self, memory: &mut [usize], deadline: Instant) -> Vec<MemtestReport> {
+    fn run_tests(&self, memory: &mut [usize], deadline: Instant) -> Vec<TestReport> {
         let mut reports = Vec::new();
         let mut timed_out = false;
 
         for test_kind in &self.test_kinds {
             let test_result = if timed_out {
-                Err(MemtestError::Observer(RuntimeError::Timeout))
+                Err(memtest::Error::Observer(RuntimeError::Timeout))
             } else if self.allow_multithread {
                 std::thread::scope(|scope| {
                     let num_threads = num_cpus::get();
@@ -204,10 +198,10 @@ impl MemtestRunner {
                         .map(|handle| {
                             handle
                                 .join()
-                                .unwrap_or(Err(MemtestError::Other(anyhow!("Thread panicked"))))
+                                .unwrap_or(Err(memtest::Error::Other(anyhow!("Thread panicked"))))
                         })
-                        .fold(Ok(MemtestOutcome::Pass), |acc, result| {
-                            use {MemtestError::*, MemtestOutcome::*};
+                        .fold(Ok(Outcome::Pass), |acc, result| {
+                            use {memtest::Error::*, Outcome::*};
                             match (acc, result) {
                                 (Err(Other(e)), _) | (_, Err(Other(e))) => Err(Other(e)),
                                 (Ok(Fail(f)), _) | (_, Ok(Fail(f))) => Ok(Fail(f)),
@@ -221,15 +215,15 @@ impl MemtestRunner {
             };
             timed_out = matches!(
                 test_result,
-                Err(MemtestError::Observer(RuntimeError::Timeout))
+                Err(memtest::Error::Observer(RuntimeError::Timeout))
             );
 
-            if matches!(test_result, Ok(MemtestOutcome::Fail(_))) && self.allow_early_termination {
-                reports.push(MemtestReport::new(*test_kind, test_result));
-                warn!("Memtest failed, terminating early");
+            if matches!(test_result, Ok(Outcome::Fail(_))) && self.allow_early_termination {
+                reports.push(TestReport::new(*test_kind, test_result));
+                warn!("Test failed, terminating early");
                 break;
             }
-            reports.push(MemtestReport::new(*test_kind, test_result));
+            reports.push(TestReport::new(*test_kind, test_result));
         }
 
         reports
@@ -237,10 +231,10 @@ impl MemtestRunner {
 
     fn run_test(
         &self,
-        test_kind: MemtestKind,
+        test_kind: TestKind,
         memory: &mut [usize],
         deadline: Instant,
-    ) -> Result<MemtestOutcome, MemtestError<RuntimeError>> {
+    ) -> Result<Outcome, memtest::Error<RuntimeError>> {
         let timeout_checker = TimeoutChecker::new(deadline);
 
         #[cfg(unix)]
@@ -248,7 +242,7 @@ impl MemtestRunner {
             let runtime_checker = unix::RuntimeChecker::new(
                 timeout_checker,
                 PageFaultChecker::new(memory.as_mut_ptr() as usize, memory.len())
-                    .map_err(MemtestError::Other)?,
+                    .map_err(memtest::Error::Other)?,
             );
             test_kind.run(memory, runtime_checker)
         } else {
@@ -261,25 +255,23 @@ impl MemtestRunner {
     }
 }
 
-impl fmt::Display for MemtestRunnerError {
+impl fmt::Display for RunnerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl Error for MemtestRunnerError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl error::Error for RunnerError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            MemtestRunnerError::MemLockFailed(err) | MemtestRunnerError::Other(err) => {
-                Some(err.as_ref())
-            }
+            RunnerError::MemLockFailed(err) | RunnerError::Other(err) => Some(err.as_ref()),
         }
     }
 }
 
-impl From<anyhow::Error> for MemtestRunnerError {
-    fn from(err: anyhow::Error) -> MemtestRunnerError {
-        MemtestRunnerError::Other(err)
+impl From<anyhow::Error> for RunnerError {
+    fn from(err: anyhow::Error) -> RunnerError {
+        RunnerError::Other(err)
     }
 }
 
@@ -302,9 +294,9 @@ impl fmt::Display for ParseMemLockModeError {
     }
 }
 
-impl Error for ParseMemLockModeError {}
+impl error::Error for ParseMemLockModeError {}
 
-impl fmt::Display for MemtestReportList {
+impl fmt::Display for TestReportList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "tested_mem_len = {}", self.tested_mem_length)?;
         writeln!(f, "mlocked = {}", self.mlocked)?;
@@ -324,8 +316,8 @@ impl fmt::Display for MemtestReportList {
     }
 }
 
-impl MemtestReportList {
-    pub fn iter(&self) -> impl Iterator<Item = &MemtestReport> {
+impl TestReportList {
+    pub fn iter(&self) -> impl Iterator<Item = &TestReport> {
         self.reports.iter()
     }
 
@@ -333,16 +325,16 @@ impl MemtestReportList {
     pub fn all_pass(&self) -> bool {
         self.reports
             .iter()
-            .all(|report| matches!(report.outcome, Ok(MemtestOutcome::Pass)))
+            .all(|report| matches!(report.outcome, Ok(Outcome::Pass)))
     }
 }
 
-impl MemtestReport {
+impl TestReport {
     fn new(
-        test_kind: MemtestKind,
-        outcome: Result<MemtestOutcome, MemtestError<RuntimeError>>,
-    ) -> MemtestReport {
-        MemtestReport { test_kind, outcome }
+        test_kind: TestKind,
+        outcome: Result<Outcome, memtest::Error<RuntimeError>>,
+    ) -> TestReport {
+        TestReport { test_kind, outcome }
     }
 }
 
@@ -352,7 +344,7 @@ impl fmt::Display for RuntimeError {
     }
 }
 
-impl Error for RuntimeError {}
+impl error::Error for RuntimeError {}
 
 impl TimeoutChecker {
     fn new(deadline: Instant) -> TimeoutChecker {

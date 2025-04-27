@@ -2,22 +2,22 @@ use {
     crate::prelude::*,
     rand::random,
     serde::{Deserialize, Deserializer, Serialize, Serializer},
-    std::{error::Error, fmt},
+    std::{error, fmt},
 };
 
 // TODO: Intend to convert this module to a standalone `no_std` crate
 
-pub type MemtestResult<O> = Result<MemtestOutcome, MemtestError<<O as TestObserver>::Error>>;
+pub type TestResult<O> = Result<Outcome, Error<<O as TestObserver>::Error>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[must_use]
-pub enum MemtestOutcome {
+pub enum Outcome {
     Pass,
-    Fail(MemtestFailure),
+    Fail(Failure),
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum MemtestFailure {
+pub enum Failure {
     /// Failure due to the actual value read being different from the expected value
     UnexpectedValue {
         address: usize,
@@ -35,49 +35,49 @@ pub enum MemtestFailure {
 }
 
 pub trait TestObserver {
-    type Error: Error;
+    type Error: error::Error;
     fn init(&mut self, expected_iter: u64);
     fn check(&mut self) -> Result<(), Self::Error>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum MemtestError<E> {
+pub enum Error<E> {
     Observer(E),
     #[serde(
-        serialize_with = "serialize_memtest_error_other",
-        deserialize_with = "deserialize_memtest_error_other"
+        serialize_with = "serialize_error_other",
+        deserialize_with = "deserialize_error_other"
     )]
     Other(anyhow::Error),
 }
 
-macro_rules! memtest_kinds {{
+macro_rules! test_kinds {{
     $($variant: ident),* $(,)?
 } => {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub enum MemtestKind {
+    pub enum TestKind {
         $($variant,)*
     }
 
-    impl MemtestKind {
+    impl TestKind {
         pub const ALL: &'static [Self] = &[
             $(Self::$variant),*
         ];
     }
 
-    impl std::str::FromStr for MemtestKind {
-        type Err = ParseMemtestKindError;
+    impl std::str::FromStr for TestKind {
+        type Err = ParseTestKindError;
         fn from_str(s: &str) -> Result<Self, Self::Err> {
             match s {
             $(
                 stringify!($variant) => Ok(Self::$variant),
             )*
-                _ => Err(ParseMemtestKindError),
+                _ => Err(ParseTestKindError),
             }
         }
     }
 }}
 
-memtest_kinds! {
+test_kinds! {
     OwnAddressBasic,
     OwnAddressRepeat,
     RandomVal,
@@ -101,10 +101,10 @@ memtest_kinds! {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct ParseMemtestKindError;
+pub struct ParseTestKindError;
 
-impl MemtestKind {
-    pub fn run<O: TestObserver>(&self, memory: &mut [usize], observer: O) -> MemtestResult<O> {
+impl TestKind {
+    pub fn run<O: TestObserver>(&self, memory: &mut [usize], observer: O) -> TestResult<O> {
         use two_region::{
             run_two_region_test_algorithm, And, BlockSeq, Checkerboard, Div, Mul, Or, RandomVal,
             SeqInc, SolidBits, Sub, Xor,
@@ -160,7 +160,7 @@ enum PassDirection {
 }
 
 type PassFn<T> = fn(&mut T, direction: &mut PassDirection) -> IterFn<T>;
-type IterFn<T> = fn(&mut T, &mut usize) -> Result<(), MemtestFailure>;
+type IterFn<T> = fn(&mut T, &mut usize) -> Result<(), Failure>;
 
 trait TestAlgorithm: fmt::Debug {
     /// The number of runs the algorithm needs. Most tests can just accept the default of '1'
@@ -179,7 +179,7 @@ trait TestAlgorithm: fmt::Debug {
     /// will be run for each memory address.
     ///
     /// The iteration function itself takes a mutable reference to each memory address and
-    /// returns either `Ok(())` or `Err(MemtestFailure)`.
+    /// returns either `Ok(())` or `Err(Failure)`.
     fn passes(&self) -> Vec<PassFn<Self>>;
 }
 
@@ -188,7 +188,7 @@ fn run_test_algorithm<T: TestAlgorithm, O: TestObserver>(
     mut test: T,
     memory: &mut [usize],
     mut observer: O,
-) -> MemtestResult<O> {
+) -> TestResult<O> {
     let expected_iter = u64::try_from(memory.len())
         .ok()
         .and_then(|count| count.checked_mul(test.num_runs()))
@@ -208,24 +208,20 @@ fn run_test_algorithm<T: TestAlgorithm, O: TestObserver>(
             };
 
             for mem_ref in mem_iter {
-                observer.check().map_err(MemtestError::Observer)?;
+                observer.check().map_err(Error::Observer)?;
                 if let Err(f) = iter_fn(&mut test, mem_ref) {
-                    return Ok(MemtestOutcome::Fail(f));
+                    return Ok(Outcome::Fail(f));
                 }
             }
         }
     }
-    Ok(MemtestOutcome::Pass)
+    Ok(Outcome::Pass)
 }
 
-fn check_expected_value(
-    address: usize,
-    expected: usize,
-    actual: usize,
-) -> Result<(), MemtestFailure> {
+fn check_expected_value(address: usize, expected: usize, actual: usize) -> Result<(), Failure> {
     if actual != expected {
         info!("Test failed at 0x{address:x}");
-        Err(MemtestFailure::UnexpectedValue {
+        Err(Failure::UnexpectedValue {
             address,
             expected,
             actual,
@@ -330,8 +326,8 @@ mod two_region {
     use {
         super::{
             address_from_ref, mem_reset, read_volatile_safe, split_slice_in_half,
-            usize_filled_from_byte, write_volatile_safe, MemtestError, MemtestFailure,
-            MemtestOutcome, MemtestResult, TestObserver,
+            usize_filled_from_byte, write_volatile_safe, Error, Failure, Outcome, TestObserver,
+            TestResult,
         },
         crate::prelude::*,
         rand::random,
@@ -365,7 +361,7 @@ mod two_region {
         mut test: T,
         memory: &mut [usize],
         mut observer: O,
-    ) -> MemtestResult<O> {
+    ) -> TestResult<O> {
         if test.reset_before_run() {
             mem_reset(memory);
         }
@@ -382,24 +378,24 @@ mod two_region {
 
             let iter_fn = test.iter_fn();
             for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
-                observer.check().map_err(MemtestError::Observer)?;
+                observer.check().map_err(Error::Observer)?;
                 iter_fn(&mut test, first_ref, second_ref);
             }
 
             for (first_ref, second_ref) in first_half.iter().zip(second_half.iter()) {
-                observer.check().map_err(MemtestError::Observer)?;
+                observer.check().map_err(Error::Observer)?;
                 if let Err(f) = check_matching_values(
                     address_from_ref(first_ref),
                     read_volatile_safe(first_ref),
                     address_from_ref(second_ref),
                     read_volatile_safe(second_ref),
                 ) {
-                    return Ok(MemtestOutcome::Fail(f));
+                    return Ok(Outcome::Fail(f));
                 }
             }
         }
 
-        Ok(MemtestOutcome::Pass)
+        Ok(Outcome::Pass)
     }
 
     fn check_matching_values(
@@ -407,10 +403,10 @@ mod two_region {
         value1: usize,
         address2: usize,
         value2: usize,
-    ) -> Result<(), MemtestFailure> {
+    ) -> Result<(), Failure> {
         if value1 != value2 {
             info!("Test failed at 0x{address1:x} compared to 0x{address2:x}");
-            Err(MemtestFailure::MismatchedValues {
+            Err(Failure::MismatchedValues {
                 address1,
                 value1,
                 address2,
@@ -1059,7 +1055,7 @@ mod mov_inv {
 /// memory block moves, as it intefere with the stress testing of memory. Unfortunately, this means
 /// that `Observer::check()` will not be called for a siginficant duration of the test run time.
 #[tracing::instrument(skip_all)]
-pub fn run_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
+pub fn run_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -> TestResult<O> {
     const CHUNK_SIZE: usize = 16;
     const OFFSET: usize = 8;
     if memory.len() < CHUNK_SIZE {
@@ -1081,7 +1077,7 @@ pub fn run_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
     let mut pattern = 1;
     for chunk in memory.chunks_exact_mut(CHUNK_SIZE) {
         for (i, mem_ref) in chunk.iter_mut().enumerate() {
-            observer.check().map_err(MemtestError::Observer)?;
+            observer.check().map_err(Error::Observer)?;
 
             let val = val_to_write(pattern, i);
             write_volatile_safe(mem_ref, val);
@@ -1114,21 +1110,21 @@ pub fn run_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) ->
             let expected = val_to_write(pattern, i);
 
             for mem_ref in [mem_ref1, mem_ref2] {
-                observer.check().map_err(MemtestError::Observer)?;
+                observer.check().map_err(Error::Observer)?;
 
                 if let Err(f) = check_expected_value(
                     address_from_ref(mem_ref),
                     expected,
                     read_volatile_safe(mem_ref),
                 ) {
-                    return Ok(MemtestOutcome::Fail(f));
+                    return Ok(Outcome::Fail(f));
                 }
             }
         }
         pattern = pattern.rotate_left(1);
     }
 
-    Ok(MemtestOutcome::Pass)
+    Ok(Outcome::Pass)
 }
 
 // TODO: In Memtest86+, block move is achieved with the `movs` assembly instruction
@@ -1154,7 +1150,7 @@ fn volatile_copy_slice<T: Copy>(dst: &mut [T], src: &[T]) {
 ///
 /// The procedure is repeated with offsets 0-19 to test all memory locations.
 #[tracing::instrument(skip_all)]
-pub fn run_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
+pub fn run_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> TestResult<O> {
     const STEP: usize = 20;
     (memory.len() > STEP)
         .then_some(())
@@ -1168,7 +1164,7 @@ pub fn run_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> 
     let pattern = random();
     for offset in 0..STEP {
         for mem_ref in memory.iter_mut().skip(offset).step_by(STEP) {
-            observer.check().map_err(MemtestError::Observer)?;
+            observer.check().map_err(Error::Observer)?;
             write_volatile_safe(mem_ref, pattern);
         }
 
@@ -1177,25 +1173,25 @@ pub fn run_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> 
                 if i % STEP == offset {
                     continue;
                 }
-                observer.check().map_err(MemtestError::Observer)?;
+                observer.check().map_err(Error::Observer)?;
                 write_volatile_safe(mem_ref, !pattern);
             }
         }
 
         for mem_ref in memory.iter().skip(offset).step_by(STEP) {
-            observer.check().map_err(MemtestError::Observer)?;
+            observer.check().map_err(Error::Observer)?;
 
             if let Err(f) = check_expected_value(
                 address_from_ref(mem_ref),
                 pattern,
                 read_volatile_safe(mem_ref),
             ) {
-                return Ok(MemtestOutcome::Fail(f));
+                return Ok(Outcome::Fail(f));
             }
         }
     }
 
-    Ok(MemtestOutcome::Pass)
+    Ok(Outcome::Pass)
 }
 
 fn read_volatile_safe<T: Copy>(src: &T) -> T {
@@ -1231,7 +1227,7 @@ fn usize_filled_from_byte(byte: u8) -> usize {
     val
 }
 
-impl fmt::Debug for MemtestFailure {
+impl fmt::Debug for Failure {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::UnexpectedValue {
@@ -1260,49 +1256,49 @@ impl fmt::Debug for MemtestFailure {
     }
 }
 
-impl fmt::Display for ParseMemtestKindError {
+impl fmt::Display for ParseTestKindError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl Error for ParseMemtestKindError {}
+impl error::Error for ParseTestKindError {}
 
-impl fmt::Display for MemtestOutcome {
+impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Outcome: {:?}", self)
     }
 }
 
-impl<E: fmt::Debug> fmt::Display for MemtestError<E> {
+impl<E: fmt::Debug> fmt::Display for Error<E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Error: {:?}", self)
     }
 }
 
-impl<E: Error + 'static> Error for MemtestError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl<E: error::Error + 'static> error::Error for Error<E> {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            MemtestError::Observer(err) => Some(err),
-            MemtestError::Other(err) => Some(err.as_ref()),
+            Error::Observer(err) => Some(err),
+            Error::Other(err) => Some(err.as_ref()),
         }
     }
 }
 
-impl<E> From<anyhow::Error> for MemtestError<E> {
-    fn from(err: anyhow::Error) -> MemtestError<E> {
-        MemtestError::Other(err)
+impl<E> From<anyhow::Error> for Error<E> {
+    fn from(err: anyhow::Error) -> Error<E> {
+        Error::Other(err)
     }
 }
 
-fn serialize_memtest_error_other<S>(error: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_error_other<S>(error: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
     serializer.serialize_str(&format!("{:?}", error))
 }
 
-fn deserialize_memtest_error_other<'de, D>(deserializer: D) -> Result<anyhow::Error, D::Error>
+fn deserialize_error_other<'de, D>(deserializer: D) -> Result<anyhow::Error, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1313,7 +1309,7 @@ where
 #[cfg(test)]
 mod test {
     use {
-        super::{MemtestKind, MemtestOutcome, TestObserver},
+        super::{Outcome, TestKind, TestObserver},
         std::convert::Infallible,
     };
 
@@ -1359,13 +1355,10 @@ mod test {
     #[test]
     fn test_memtest_expected_iter() {
         let mut memory = vec![0; 512];
-        for test_kind in MemtestKind::ALL {
+        for test_kind in TestKind::ALL {
             let mut counter = IterationCounter::new();
             assert!(
-                matches!(
-                    test_kind.run(&mut memory, &mut counter),
-                    Ok(MemtestOutcome::Pass),
-                ),
+                matches!(test_kind.run(&mut memory, &mut counter), Ok(Outcome::Pass),),
                 "{:?} should pass",
                 test_kind
             );
