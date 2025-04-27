@@ -105,6 +105,11 @@ pub struct ParseMemtestKindError;
 
 impl MemtestKind {
     pub fn run<O: TestObserver>(&self, memory: &mut [usize], observer: O) -> MemtestResult<O> {
+        use two_region::{
+            run_two_region_test_algorithm, And, BlockSeq, Checkerboard, Div, Mul, Or, RandomVal,
+            SeqInc, SolidBits, Sub, Xor,
+        };
+
         match self {
             Self::OwnAddressBasic => {
                 run_test_algorithm(OwnAddressBasic::default(), memory, observer)
@@ -112,17 +117,23 @@ impl MemtestKind {
             Self::OwnAddressRepeat => {
                 run_test_algorithm(OwnAddressRepeat::default(), memory, observer)
             }
-            Self::RandomVal => test_random_val(memory, observer),
-            Self::Xor => test_xor(memory, observer),
-            Self::Sub => test_sub(memory, observer),
-            Self::Mul => test_mul(memory, observer),
-            Self::Div => test_div(memory, observer),
-            Self::Or => test_or(memory, observer),
-            Self::And => test_and(memory, observer),
-            Self::SeqInc => test_seq_inc(memory, observer),
-            Self::SolidBits => test_solid_bits(memory, observer),
-            Self::Checkerboard => test_checkerboard(memory, observer),
-            Self::BlockSeq => test_block_seq(memory, observer),
+            Self::RandomVal => {
+                run_two_region_test_algorithm(RandomVal::default(), memory, observer)
+            }
+            Self::Xor => run_two_region_test_algorithm(Xor::default(), memory, observer),
+            Self::Sub => run_two_region_test_algorithm(Sub::default(), memory, observer),
+            Self::Mul => run_two_region_test_algorithm(Mul::default(), memory, observer),
+            Self::Div => run_two_region_test_algorithm(Div::default(), memory, observer),
+            Self::Or => run_two_region_test_algorithm(Or::default(), memory, observer),
+            Self::And => run_two_region_test_algorithm(And::default(), memory, observer),
+            Self::SeqInc => run_two_region_test_algorithm(SeqInc::default(), memory, observer),
+            Self::SolidBits => {
+                run_two_region_test_algorithm(SolidBits::default(), memory, observer)
+            }
+            Self::Checkerboard => {
+                run_two_region_test_algorithm(Checkerboard::default(), memory, observer)
+            }
+            Self::BlockSeq => run_two_region_test_algorithm(BlockSeq::default(), memory, observer),
             Self::MovInvFixedBlock => {
                 run_test_algorithm(mov_inv::FixedBlock::default(), memory, observer)
             }
@@ -133,9 +144,9 @@ impl MemtestKind {
                 run_test_algorithm(mov_inv::FixedRandom::default(), memory, observer)
             }
             Self::MovInvWalk => run_test_algorithm(mov_inv::Walk::default(), memory, observer),
-            Self::BlockMove => test_block_move(memory, observer),
+            Self::BlockMove => run_block_move(memory, observer),
             Self::MovInvRandom => run_test_algorithm(mov_inv::Random::default(), memory, observer),
-            Self::Modulo20 => test_modulo_20(memory, observer),
+            Self::Modulo20 => run_modulo_20(memory, observer),
         }
     }
 }
@@ -316,6 +327,356 @@ impl OwnAddressRepeat {
     }
 }
 
+mod two_region {
+    use {
+        super::{
+            address_from_ref, mem_reset, read_volatile_safe, split_slice_in_half,
+            usize_filled_from_byte, write_volatile_safe, MemtestError, MemtestFailure,
+            MemtestOutcome, MemtestResult, TestObserver,
+        },
+        crate::prelude::*,
+        rand::random,
+    };
+
+    type TwoRegionIterFn<T> = fn(&mut T, &mut usize, &mut usize);
+
+    /// A two region test has to passes of memory for every run.  The test splits memory into
+    /// two halves. The first pass iterates through memory and writes some memory pattern to each
+    /// pair of locations. The second pass reads through and compare the two halves.
+    trait TwoRegionTestAlgorithm: std::fmt::Debug + Default {
+        /// The number of runs the algorithm needs. Most tests can just accept the default of '1'
+        fn num_runs(&self) -> u64 {
+            1
+        }
+        /// Initialize the state for the run given by `run_idx`. Most tests don't need to do anything.
+        fn start_run(&mut self, _run_idx: u64) {}
+
+        /// Returns whether a memory reset is needed at the start of each run
+        /// If true, the algorithm will reset all bits to 1.
+        fn reset_before_run(&self) -> bool;
+
+        /// Returns the function that is called for every iteration of the first pass to generate a
+        /// memory pattern.
+        fn iter_fn(&self) -> TwoRegionIterFn<Self>;
+    }
+
+    #[tracing::instrument(skip(memory, observer))]
+    pub(super) fn run_two_region_test_algorithm<T: TwoRegionTestAlgorithm, O: TestObserver>(
+        mut test: T,
+        memory: &mut [usize],
+        mut observer: O,
+    ) -> MemtestResult<O> {
+        if test.reset_before_run() {
+            mem_reset(memory);
+        }
+        let (first_half, second_half) = split_slice_in_half(memory)?;
+        let expected_iter = u64::try_from(first_half.len())
+            .ok()
+            .and_then(|count| count.checked_mul(2))
+            .and_then(|count| count.checked_mul(test.num_runs()))
+            .context("Total number of iterations overflowed")?;
+        observer.init(expected_iter);
+
+        for i in 0..test.num_runs() {
+            test.start_run(i);
+
+            let iter_fn = test.iter_fn();
+            for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
+                observer.check().map_err(MemtestError::Observer)?;
+                iter_fn(&mut test, first_ref, second_ref);
+            }
+
+            for (first_ref, second_ref) in first_half.iter().zip(second_half.iter()) {
+                observer.check().map_err(MemtestError::Observer)?;
+                if let Err(f) = check_matching_values(
+                    address_from_ref(first_ref),
+                    read_volatile_safe(first_ref),
+                    address_from_ref(second_ref),
+                    read_volatile_safe(second_ref),
+                ) {
+                    return Ok(MemtestOutcome::Fail(f));
+                }
+            }
+        }
+
+        Ok(MemtestOutcome::Pass)
+    }
+
+    fn check_matching_values(
+        address1: usize,
+        value1: usize,
+        address2: usize,
+        value2: usize,
+    ) -> Result<(), MemtestFailure> {
+        if value1 != value2 {
+            info!("Test failed at 0x{address1:x} compared to 0x{address2:x}");
+            Err(MemtestFailure::MismatchedValues {
+                address1,
+                value1,
+                address2,
+                value2,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Split given memory into two halves and iterate through memory locations in pairs. For each
+    /// pair, write a random value. After all locations are written, read and compare the two halves.
+    #[derive(Debug, Default)]
+    pub(super) struct RandomVal {}
+    impl TwoRegionTestAlgorithm for RandomVal {
+        fn reset_before_run(&self) -> bool {
+            false
+        }
+
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            |_state, first_ref, second_ref| {
+                let val = random();
+                write_volatile_safe(first_ref, val);
+                write_volatile_safe(second_ref, val);
+            }
+        }
+    }
+
+    macro_rules! two_region_pass_fn_with_transform_fn {
+        ($transform_fn:path) => {
+            |_state, first_ref, second_ref| {
+                let mixing_val: usize = random();
+
+                let val = read_volatile_safe(first_ref);
+                let new_val = $transform_fn(val, mixing_val);
+                write_volatile_safe(first_ref, new_val);
+
+                let val = read_volatile_safe(second_ref);
+                let new_val = $transform_fn(val, mixing_val);
+                write_volatile_safe(second_ref, new_val);
+            }
+        };
+    }
+
+    /// Reset all bits in given memory to 1s. Split given memory into two halves and iterate through
+    /// memory locations in pairs. For each pair, write the XOR result of a random value and the value
+    /// read from the location. After all locations are written, read and compare the two halves.
+    #[derive(Debug, Default)]
+    pub(super) struct Xor {}
+    impl TwoRegionTestAlgorithm for Xor {
+        fn reset_before_run(&self) -> bool {
+            true
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            two_region_pass_fn_with_transform_fn!(std::ops::BitXor::bitxor)
+        }
+    }
+
+    /// Reset all bits in given memory to 1s. Split given memory into two halves and iterate through
+    /// memory locations in pairs. For each pair, write the result of subtracting a random value from
+    /// the value read from the location. After all locations are written, read and compare the two
+    /// halves.
+    #[derive(Debug, Default)]
+    pub(super) struct Sub {}
+    impl TwoRegionTestAlgorithm for Sub {
+        fn reset_before_run(&self) -> bool {
+            true
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            two_region_pass_fn_with_transform_fn!(usize::wrapping_sub)
+        }
+    }
+
+    /// Reset all bits in given memory to 1s. Split given memory into two halves and iterate through
+    /// memory locations in pairs. For each pair, write the result of multiplying a random value with
+    /// the value read from the location. After all locations are written, read and compare the two
+    /// halves.
+    #[derive(Debug, Default)]
+    pub(super) struct Mul {}
+    impl TwoRegionTestAlgorithm for Mul {
+        fn reset_before_run(&self) -> bool {
+            true
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            two_region_pass_fn_with_transform_fn!(usize::wrapping_mul)
+        }
+    }
+
+    /// Reset all bits in given memory to 1s. Split given memory into two halves and iterate through
+    /// memory locations in pairs. For each pair, write the result of dividing the value read from the
+    /// location with a random value. After all locations are written, read and compare the two halves.
+    #[derive(Debug, Default)]
+    pub(super) struct Div {}
+    impl TwoRegionTestAlgorithm for Div {
+        fn reset_before_run(&self) -> bool {
+            true
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            two_region_pass_fn_with_transform_fn!(usize::wrapping_div)
+        }
+    }
+
+    /// Reset all bits in given memory to 1s. Split given memory into two halves and iterate through
+    /// memory locations in pairs. For each pair, write the OR result of a random value and the value
+    /// read from the location. After all locations are written, read and compare the two halves.
+    #[derive(Debug, Default)]
+    pub(super) struct Or {}
+    impl TwoRegionTestAlgorithm for Or {
+        fn reset_before_run(&self) -> bool {
+            true
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            two_region_pass_fn_with_transform_fn!(std::ops::BitOr::bitor)
+        }
+    }
+
+    /// Reset all bits in given memory to 1s. Split given memory into two halves and iterate through
+    /// memory locations in pairs. For each pair, write the AND result of a random value and the value
+    /// read from the location. After all locations are written, read and compare the two halves.
+    #[derive(Debug, Default)]
+    pub(super) struct And {}
+    impl TwoRegionTestAlgorithm for And {
+        fn reset_before_run(&self) -> bool {
+            true
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            two_region_pass_fn_with_transform_fn!(std::ops::BitAnd::bitand)
+        }
+    }
+
+    /// Split given memory into two halves and iterate through memory locations in pairs. Generate a
+    /// random value at the start. For each pair, write the result of adding the random value and the
+    /// index of iteration. After all locations are written, read and compare the two halves.
+    #[derive(Debug, Default)]
+    pub(super) struct SeqInc {
+        val: usize,
+    }
+    impl TwoRegionTestAlgorithm for SeqInc {
+        fn reset_before_run(&self) -> bool {
+            false
+        }
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            |state, first_ref, second_ref| {
+                state.val = state.val.wrapping_add(1);
+                write_volatile_safe(first_ref, state.val);
+                write_volatile_safe(second_ref, state.val);
+            }
+        }
+    }
+
+    /// Split given memory into two halves and iterate through memory locations in pairs. For each
+    /// pair, write to all bits as either 1s or 0s, alternating after each memory location pair.
+    /// After all locations are written, read and compare the two halves.
+    /// This procedure is repeated 64 times.
+    #[derive(Debug)]
+    pub(super) struct SolidBits {
+        solid_bits: usize,
+        val: usize,
+    }
+
+    impl Default for SolidBits {
+        fn default() -> Self {
+            SolidBits {
+                solid_bits: !0,
+                val: usize::default(),
+            }
+        }
+    }
+
+    impl TwoRegionTestAlgorithm for SolidBits {
+        fn num_runs(&self) -> u64 {
+            64
+        }
+
+        fn start_run(&mut self, _run_idx: u64) {
+            self.solid_bits = !self.solid_bits;
+            self.val = self.solid_bits;
+        }
+
+        fn reset_before_run(&self) -> bool {
+            false
+        }
+
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            |state, first_ref, second_ref| {
+                state.val = !state.val;
+                write_volatile_safe(first_ref, state.val);
+                write_volatile_safe(second_ref, state.val);
+            }
+        }
+    }
+
+    /// Split given memory into two halves and iterate through memory locations in pairs. For each pair,
+    /// write to a pattern of alternating 1s and 0s (in bytes it is either 0x55 or 0xaa, and alternating
+    /// after each memory location pair). After all locations are written, read and compare the two
+    /// halves.
+    /// This procedure is repeated 64 times.
+    #[derive(Debug)]
+    pub(super) struct Checkerboard {
+        checker_board: usize,
+        val: usize,
+    }
+
+    impl Default for Checkerboard {
+        fn default() -> Self {
+            Checkerboard {
+                checker_board: usize_filled_from_byte(0xaa),
+                val: usize::default(),
+            }
+        }
+    }
+
+    impl TwoRegionTestAlgorithm for Checkerboard {
+        fn num_runs(&self) -> u64 {
+            64
+        }
+
+        fn start_run(&mut self, _run_idx: u64) {
+            self.checker_board = !self.checker_board;
+            self.val = self.checker_board;
+        }
+
+        fn reset_before_run(&self) -> bool {
+            false
+        }
+
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            |state, first_ref, second_ref| {
+                state.val = !state.val;
+                write_volatile_safe(first_ref, state.val);
+                write_volatile_safe(second_ref, state.val);
+            }
+        }
+    }
+
+    /// Split given memory into two halves and iterate through memory locations in pairs. For each pair,
+    /// write to all bytes with the value i. After all locations are written, read and compare the two
+    /// halves.
+    /// This procedure is repeated 256 times, with i corresponding to the iteration number 0-255.
+    #[derive(Debug, Default)]
+    pub(super) struct BlockSeq {
+        val: usize,
+    }
+
+    impl TwoRegionTestAlgorithm for BlockSeq {
+        fn num_runs(&self) -> u64 {
+            256
+        }
+
+        fn start_run(&mut self, run_idx: u64) {
+            self.val = usize_filled_from_byte(run_idx.try_into().unwrap());
+        }
+
+        fn reset_before_run(&self) -> bool {
+            false
+        }
+
+        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+            |state, first_ref, second_ref| {
+                write_volatile_safe(first_ref, state.val);
+                write_volatile_safe(second_ref, state.val);
+            }
+        }
+    }
+}
+
 mod mov_inv {
     use {
         super::{
@@ -326,6 +687,22 @@ mod mov_inv {
         std::time::{SystemTime, UNIX_EPOCH},
     };
 
+    /// This test adapts the moving inversion algorithm implemented by [memtest86+](https://github.com/
+    /// memtest86plus/memtest86plus). As described in the the [Memtest86+ Test Algorithm Section](https://github.com/
+    /// memtest86plus/memtest86plus?tab=readme-ov-file#memtest86-test-algorithms),
+    ///
+    /// "The moving inversion tests work as follows:
+    /// 1. Fill memory with a pattern
+    /// 2. Starting at the lowest address
+    ///     i. check that the pattern has not changed
+    ///     ii. write the pattern's complement
+    ///     iii. increment the address
+    ///     iv. repeat 2.1 to 2.3
+    /// 3. Starting at the highest address
+    ///     i. check that the pattern has not changed
+    ///     ii. write the pattern's complement
+    ///     iii. decrement the address
+    ///     iv. repeat 3.1 to 3.3 "
     pub(super) trait MovInvAlgorithm: std::fmt::Debug + Default {
         fn num_runs(&self) -> u64;
 
@@ -402,6 +779,7 @@ mod mov_inv {
         run_idx: u64,
     }
 
+    /// This test runs the moving inversion algorithm with fixed patterns of all bits as 1s or 0s.
     impl MovInvAlgorithm for FixedBlock {
         fn num_runs(&self) -> u64 {
             2
@@ -430,6 +808,9 @@ mod mov_inv {
         }
     }
 
+    /// This test runs the moving inversion algorithm with fixed 8-bit patterns where 1 bit is 1/0 and the
+    /// other 7 bits are 0/1s.  The procedure is repeated 8 times with the pattern rotated by 1 bit each
+    /// time to test all bits in a byte.
     #[derive(Debug)]
     pub(super) struct FixedBit {
         run_idx: u64,
@@ -476,6 +857,7 @@ mod mov_inv {
         }
     }
 
+    /// This test runs the moving inversion algorithm with a random fixed pattern.
     #[derive(Debug)]
     pub(super) struct FixedRandom {
         run_idx: u64,
@@ -526,6 +908,11 @@ mod mov_inv {
         pattern: usize,
     }
 
+    /// This test runs the moving inversion algorithm with a "walking" bit pattern. The algorithm starts
+    /// with 0x1 (or the compliment of 0x1) and "walks" the bit by shifting left for every new memory
+    /// location.
+    /// The procedure is repeated with offsets 0-31 or 0-63 depending on the size of `usize` to test all
+    /// bits in a memory location.
     impl MovInvAlgorithm for Walk {
         fn num_runs(&self) -> u64 {
             u64::from(usize::BITS) * 2
@@ -1206,7 +1593,7 @@ fn mov_inv_walking_pattern<O: TestObserver>(
 /// memory block moves, as it intefere with the stress testing of memory. Unfortunately, this means
 /// that `Observer::check()` will not be called for a siginficant duration of the test run time.
 #[tracing::instrument(skip_all)]
-pub fn test_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
+pub fn run_block_move<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
     const CHUNK_SIZE: usize = 16;
     const OFFSET: usize = 8;
     if memory.len() < CHUNK_SIZE {
@@ -1374,7 +1761,7 @@ pub fn test_mov_inv_random<O: TestObserver>(
 ///
 /// The procedure is repeated with offsets 0-19 to test all memory locations.
 #[tracing::instrument(skip_all)]
-pub fn test_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
+pub fn run_modulo_20<O: TestObserver>(memory: &mut [usize], mut observer: O) -> MemtestResult<O> {
     const STEP: usize = 20;
     (memory.len() > STEP)
         .then_some(())
