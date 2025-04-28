@@ -334,7 +334,7 @@ mod two_region {
         std::fmt,
     };
 
-    type TwoRegionIterFn<T> = fn(&mut T, &mut usize, &mut usize);
+    type TwoRegionWriteFn<T> = fn(&mut T, &mut usize, &mut usize);
 
     /// A two region test has to passes of memory for every run.  The test splits memory into
     /// two halves. The first pass iterates through memory and writes some memory pattern to each
@@ -351,9 +351,9 @@ mod two_region {
         /// If true, the algorithm will reset all bits to 1.
         fn reset_before_run(&self) -> bool;
 
-        /// Returns the function that is called for every iteration of the first pass to generate a
-        /// memory pattern.
-        fn iter_fn(&self) -> TwoRegionIterFn<Self>;
+        /// Returns the function that is called for every iteration of the first pass to write to
+        /// memory.
+        fn write_fn(&self) -> TwoRegionWriteFn<Self>;
     }
 
     #[tracing::instrument(skip(memory, observer))]
@@ -376,10 +376,10 @@ mod two_region {
         for i in 0..test.num_runs() {
             test.start_run(i);
 
-            let iter_fn = test.iter_fn();
+            let write_fn = test.write_fn();
             for (first_ref, second_ref) in first_half.iter_mut().zip(second_half.iter_mut()) {
                 observer.check().map_err(Error::Observer)?;
-                iter_fn(&mut test, first_ref, second_ref);
+                write_fn(&mut test, first_ref, second_ref);
             }
 
             for (first_ref, second_ref) in first_half.iter().zip(second_half.iter()) {
@@ -426,7 +426,7 @@ mod two_region {
             false
         }
 
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
             |_state, first_ref, second_ref| {
                 let val = random();
                 write_volatile_safe(first_ref, val);
@@ -435,7 +435,7 @@ mod two_region {
         }
     }
 
-    macro_rules! two_region_pass_fn_with_transform_fn {
+    macro_rules! two_region_write_fn_with_transform_fn {
         ($transform_fn:expr) => {
             |_state, first_ref, second_ref| {
                 let mixing_val: usize = random();
@@ -460,8 +460,8 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             true
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
-            two_region_pass_fn_with_transform_fn!(std::ops::BitXor::bitxor)
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
+            two_region_write_fn_with_transform_fn!(std::ops::BitXor::bitxor)
         }
     }
 
@@ -475,8 +475,8 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             true
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
-            two_region_pass_fn_with_transform_fn!(usize::wrapping_sub)
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
+            two_region_write_fn_with_transform_fn!(usize::wrapping_sub)
         }
     }
 
@@ -490,8 +490,8 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             true
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
-            two_region_pass_fn_with_transform_fn!(usize::wrapping_mul)
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
+            two_region_write_fn_with_transform_fn!(usize::wrapping_mul)
         }
     }
 
@@ -504,8 +504,8 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             true
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
-            two_region_pass_fn_with_transform_fn!(
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
+            two_region_write_fn_with_transform_fn!(
                 |n: usize, d: usize| n.wrapping_div(usize::max(d, 1))
             )
         }
@@ -520,8 +520,8 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             true
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
-            two_region_pass_fn_with_transform_fn!(std::ops::BitOr::bitor)
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
+            two_region_write_fn_with_transform_fn!(std::ops::BitOr::bitor)
         }
     }
 
@@ -534,8 +534,8 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             true
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
-            two_region_pass_fn_with_transform_fn!(std::ops::BitAnd::bitand)
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
+            two_region_write_fn_with_transform_fn!(std::ops::BitAnd::bitand)
         }
     }
 
@@ -550,7 +550,7 @@ mod two_region {
         fn reset_before_run(&self) -> bool {
             false
         }
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
             |state, first_ref, second_ref| {
                 state.val = state.val.wrapping_add(1);
                 write_volatile_safe(first_ref, state.val);
@@ -592,7 +592,7 @@ mod two_region {
             false
         }
 
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
             |state, first_ref, second_ref| {
                 state.val = !state.val;
                 write_volatile_safe(first_ref, state.val);
@@ -635,7 +635,7 @@ mod two_region {
             false
         }
 
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
             |state, first_ref, second_ref| {
                 state.val = !state.val;
                 write_volatile_safe(first_ref, state.val);
@@ -666,7 +666,7 @@ mod two_region {
             false
         }
 
-        fn iter_fn(&self) -> TwoRegionIterFn<Self> {
+        fn write_fn(&self) -> TwoRegionWriteFn<Self> {
             |state, first_ref, second_ref| {
                 write_volatile_safe(first_ref, state.val);
                 write_volatile_safe(second_ref, state.val);
