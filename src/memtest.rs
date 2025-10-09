@@ -339,7 +339,7 @@ mod two_region {
     /// A two region test has to passes of memory for every run.  The test splits memory into
     /// two halves. The first pass iterates through memory and writes some memory pattern to each
     /// pair of locations. The second pass reads through and compare the two halves.
-    trait TwoRegionTestAlgorithm: fmt::Debug + Default {
+    pub(super) trait TwoRegionTestAlgorithm: fmt::Debug + Default {
         /// The number of runs the algorithm needs. Most tests can just accept the default of '1'
         fn num_runs(&self) -> u64 {
             1
